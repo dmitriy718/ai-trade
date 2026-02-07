@@ -285,7 +285,7 @@ class KrakenRESTClient:
         """Get recent public trades for a pair."""
         kraken_pair = self.PAIR_MAP.get(pair, pair.replace("/", ""))
         params: Dict[str, Any] = {"pair": kraken_pair}
-        if since:
+        if since is not None:  # S13 FIX: since=0 is valid
             params["since"] = since
         result = await self._request("GET", "/0/public/Trades", params)
         for key in result:

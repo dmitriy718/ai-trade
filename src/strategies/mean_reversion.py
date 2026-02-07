@@ -191,7 +191,8 @@ class MeanReversionStrategy(BaseStrategy):
                 take_profit = curr_middle
         elif direction == SignalDirection.SHORT:
             stop_loss, take_profit = compute_sl_tp(curr_price, curr_atr, "short", 2.0, 3.0)
-            if curr_middle < take_profit:
+            # S11 FIX: For shorts, middle band TP is above take_profit (closer to entry = more conservative)
+            if curr_middle > take_profit and curr_middle < curr_price:
                 take_profit = curr_middle
         else:
             stop_loss = 0.0

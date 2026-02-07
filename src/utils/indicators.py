@@ -56,20 +56,43 @@ def compute_sl_tp(
 
 def ema(data: np.ndarray, period: int) -> np.ndarray:
     """
-    Exponential Moving Average using vectorized computation.
+    Exponential Moving Average — NaN-safe implementation.
     
-    # ENHANCEMENT: Uses stable recursive formula to avoid float drift
+    Skips leading NaN values and starts the EMA from the first
+    valid data window. This allows chaining EMAs (e.g., MACD signal
+    line = EMA of EMA) without NaN propagation.
     """
     if len(data) < period:
-        return np.full_like(data, np.nan)
+        return np.full_like(data, np.nan, dtype=float)
 
+    result = np.full(len(data), np.nan, dtype=float)
     alpha = 2.0 / (period + 1)
-    result = np.empty_like(data)
-    result[:period - 1] = np.nan
-    result[period - 1] = np.mean(data[:period])
 
-    for i in range(period, len(data)):
-        result[i] = alpha * data[i] + (1 - alpha) * result[i - 1]
+    # Find the first index where we have `period` consecutive non-NaN values
+    start = -1
+    count = 0
+    for i in range(len(data)):
+        if np.isnan(data[i]):
+            count = 0
+        else:
+            count += 1
+            if count >= period:
+                start = i - period + 1
+                break
+
+    if start < 0:
+        return result  # Not enough valid data
+
+    # Initialize from the first valid window
+    seed_end = start + period
+    result[seed_end - 1] = np.nanmean(data[start:seed_end])
+
+    # Propagate forward
+    for i in range(seed_end, len(data)):
+        if np.isnan(data[i]):
+            result[i] = result[i - 1]  # Hold previous value through NaN gaps
+        else:
+            result[i] = alpha * data[i] + (1 - alpha) * result[i - 1]
 
     return result
 
@@ -386,3 +409,74 @@ def _cluster_levels(levels: list, tolerance: float) -> list:
             clustered.append(level)
 
     return clustered
+
+
+# ------------------------------------------------------------------
+# Keltner Channels
+# ------------------------------------------------------------------
+
+def keltner_channels(
+    highs: np.ndarray, lows: np.ndarray, closes: np.ndarray,
+    ema_period: int = 20, atr_period: int = 14, multiplier: float = 1.5,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Keltner Channels: EMA ± multiplier * ATR.
+    
+    Returns (upper, middle, lower).
+    
+    - multiplier=1.5 is tighter — good for mean reversion entries
+    - multiplier=2.0 is standard — good for trend confirmation
+    """
+    middle = ema(closes, ema_period)
+    atr_vals = atr(highs, lows, closes, atr_period)
+
+    upper = middle + multiplier * atr_vals
+    lower = middle - multiplier * atr_vals
+
+    return upper, middle, lower
+
+
+def keltner_position(
+    closes: np.ndarray, highs: np.ndarray, lows: np.ndarray,
+    ema_period: int = 20, atr_period: int = 14, multiplier: float = 1.5,
+) -> np.ndarray:
+    """
+    Position within Keltner Channel.
+    0.0 = at lower band, 0.5 = at middle, 1.0 = at upper band.
+    Can exceed [0,1] for extreme moves outside the channel.
+    """
+    upper, middle, lower = keltner_channels(
+        highs, lows, closes, ema_period, atr_period, multiplier
+    )
+    width = upper - lower
+    safe_width = np.where(width > 0, width, 1.0)
+    return (closes - lower) / safe_width
+
+
+# ------------------------------------------------------------------
+# MACD (Moving Average Convergence Divergence)
+# ------------------------------------------------------------------
+
+def macd(
+    closes: np.ndarray,
+    fast_period: int = 12, slow_period: int = 26, signal_period: int = 9,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    MACD: (macd_line, signal_line, histogram).
+    
+    - macd_line = EMA(fast) - EMA(slow)
+    - signal_line = EMA(macd_line, signal_period)
+    - histogram = macd_line - signal_line
+    
+    Histogram > 0 = bullish momentum
+    Histogram < 0 = bearish momentum
+    Histogram crossing zero = momentum shift
+    """
+    fast_ema = ema(closes, fast_period)
+    slow_ema = ema(closes, slow_period)
+
+    macd_line = fast_ema - slow_ema
+    signal_line = ema(macd_line, signal_period)
+    histogram = macd_line - signal_line
+
+    return macd_line, signal_line, histogram

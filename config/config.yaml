@@ -36,6 +36,19 @@ trading:
   cooldown_seconds: 300
 
 strategies:
+  # Keltner Channel — primary strategy for high win rate
+  keltner:
+    enabled: true
+    ema_period: 20
+    atr_period: 14
+    kc_multiplier: 1.5
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    rsi_period: 14
+    rsi_long_max: 40
+    rsi_short_min: 60
+    weight: 0.30
   # Tuned for 1-MINUTE candles — longer periods to filter noise
   trend:
     enabled: true

@@ -78,7 +78,21 @@ class ReversalConfig(StrategyWeights):
     confirmation_candles: int = 3
 
 
+class KeltnerConfig(StrategyWeights):
+    ema_period: int = 20
+    atr_period: int = 14
+    kc_multiplier: float = 1.5
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    rsi_period: int = 14
+    rsi_long_max: float = 40
+    rsi_short_min: float = 60
+    weight: float = 0.30
+
+
 class StrategiesConfig(BaseModel):
+    keltner: KeltnerConfig = Field(default_factory=KeltnerConfig)
     trend: TrendConfig = Field(default_factory=TrendConfig)
     mean_reversion: MeanReversionConfig = Field(default_factory=MeanReversionConfig)
     momentum: MomentumConfig = Field(default_factory=MomentumConfig)

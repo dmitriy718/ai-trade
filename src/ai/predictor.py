@@ -255,9 +255,9 @@ class TFLitePredictor:
         if volume_ratio > 1.3:
             score += min((volume_ratio - 1.0) * 0.1, 0.1)
 
-        # OBI agreement
-        if abs(obi) > 0.15:
-            score += 0.08
+        # S4 FIX: OBI and directional features removed from heuristic
+        # (heuristic doesn't know trade direction — these would boost wrong signals)
+        # Only score market-quality features here
 
         # Bollinger position (mean reversion scoring)
         if 0.2 < bb_pos < 0.8:
@@ -265,13 +265,7 @@ class TFLitePredictor:
         elif bb_pos < 0.1 or bb_pos > 0.9:
             score += 0.06  # Extreme levels can be profitable reversals
 
-        # Trend alignment
-        if abs(trend) > 0.005:
-            score += 0.07
-
-        # Momentum
-        if abs(momentum_val) > 0.01:
-            score += 0.05
+        # S4 FIX: Trend/momentum removed (direction-agnostic heuristic can't use these correctly)
 
         return np.clip(score, 0.0, 1.0)
 
