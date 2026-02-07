@@ -222,8 +222,7 @@ class RiskManager:
         if position_size_usd < 10:  # Minimum $10 position
             result.reason = (
                 f"Position size too small: ${position_size_usd:.2f} "
-                f"(kelly=${kelly_size:.2f}, fixed=${fixed_risk_size:.2f}, "
-                f"kelly_adj={kelly_adjusted:.4f}, sl_pct={sl_pct:.4f}, "
+                f"(kelly_adj={kelly_adjusted:.4f}, sl_pct={sl_pct:.4f}, "
                 f"dd_factor={drawdown_factor:.2f}, cap={remaining_capacity:.2f})"
             )
             return result

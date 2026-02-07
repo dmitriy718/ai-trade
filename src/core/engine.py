@@ -233,72 +233,31 @@ class BotEngine:
             logger.error("Pair warmup failed", pair=pair, error=str(e))
             raise
 
-    async def start(self) -> None:
-        """
-        Start the bot engine and all background tasks.
-        
-        # ENHANCEMENT: Added signal handler for graceful shutdown
-        """
-        await self.initialize()
-        await self.warmup()
-
-        self._running = True
-        self._start_time = time.time()
-
-        # Setup signal handlers
-        loop = asyncio.get_event_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
-
-        # Start background tasks
-        self._tasks = [
-            asyncio.create_task(self._main_scan_loop()),
-            asyncio.create_task(self._ws_data_loop()),
-            asyncio.create_task(self._health_monitor()),
-            asyncio.create_task(self._cleanup_loop()),
-        ]
-
-        await self.db.log_thought(
-            "system",
-            "🚀 Bot engine STARTED - All systems operational",
-            severity="info",
-        )
-
-        logger.info("Bot engine started, entering main loop")
-
-        # Wait for all tasks
-        try:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        except asyncio.CancelledError:
-            pass
+    # S14 FIX: Removed dead start() method. main.py manages lifecycle directly.
 
     async def stop(self) -> None:
         """Gracefully stop the bot engine."""
         logger.info("Stopping bot engine...")
         self._running = False
 
-        # Cancel all tasks
+        # Cancel all tasks and WAIT for them to finish (S10 FIX)
         for task in self._tasks:
             task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
 
-        # Close positions if configured
-        if self.executor:
-            open_trades = await self.db.get_open_trades()
-            if open_trades:
-                logger.warning(
-                    "Open positions at shutdown",
-                    count=len(open_trades)
-                )
-
-        # Cleanup
+        # Now safe to close resources
         if self.ws_client:
             await self.ws_client.disconnect()
         if self.rest_client:
             await self.rest_client.close()
         if self.db:
-            await self.db.log_thought(
-                "system", "Bot engine STOPPED", severity="warning"
-            )
+            try:
+                await self.db.log_thought(
+                    "system", "Bot engine STOPPED", severity="warning"
+                )
+            except Exception:
+                pass
             await self.db.close()
 
         logger.info("Bot engine stopped")
@@ -358,7 +317,7 @@ class BotEngine:
                     await self.db.log_thought(
                         "analysis",
                         f"🔍 {signal.pair} | {signal.direction.value.upper()} | "
-                        f"Confluence: {signal.confluence_count}/5 | "
+                        f"Confluence: {signal.confluence_count}/6 | "
                         f"Strength: {signal.strength:.2f} | "
                         f"AI Conf: {ai_confidence:.2f} | "
                         f"OBI: {signal.obi:+.3f} "
@@ -367,8 +326,18 @@ class BotEngine:
                         metadata=signal.to_dict(),
                     )
 
-                    # Skip execution if confluence too low
-                    if signal.confluence_count < min_confluence:
+                    # Determine if we should trade this signal:
+                    # - Normal: need 2+ strategies agreeing (confluence >= 2)
+                    # - Keltner solo: it has 3 internal confirmations (KC + MACD + RSI)
+                    #   so treat it as self-sufficient when confidence is high
+                    has_keltner = any(
+                        s.strategy_name == "keltner" and s.is_actionable
+                        for s in signal.signals
+                        if s.direction == signal.direction
+                    )
+                    keltner_solo_ok = has_keltner and signal.confidence >= 0.60
+
+                    if signal.confluence_count < min_confluence and not keltner_solo_ok:
                         continue
 
                     # Execute if meets threshold
@@ -437,19 +406,27 @@ class BotEngine:
                     self.config.monitoring.health_check_interval
                 )
 
-                # Check WebSocket connection
+                # S9 FIX: Check WebSocket and restart task if dead
                 if self.ws_client and not self.ws_client.is_connected:
-                    logger.warning("WebSocket disconnected, triggering reconnect")
-                    await self.db.log_thought(
-                        "health",
-                        "⚠️ WebSocket disconnected - auto-reconnecting",
-                        severity="warning",
+                    # Check if any WS task is still alive
+                    ws_alive = any(
+                        not t.done() for t in self._tasks
+                        if hasattr(t, '_coro') and 'ws_data' in str(getattr(t, '_coro', ''))
                     )
+                    if not ws_alive:
+                        logger.warning("WebSocket task dead, restarting")
+                        self.ws_client._reconnect_count = 0
+                        self._tasks.append(asyncio.create_task(self._ws_data_loop()))
+                        await self.db.log_thought(
+                            "health", "WebSocket task restarted", severity="warning",
+                        )
+                    else:
+                        logger.warning("WebSocket disconnected, reconnecting internally")
 
-                # Check data freshness
+                # Check data freshness (5-min threshold — low-volume pairs are naturally slower)
                 stale_pairs = [
                     pair for pair in self.pairs
-                    if self.market_data.is_stale(pair, max_age_seconds=300)
+                    if self.market_data.is_stale(pair, max_age_seconds=600)
                 ]
                 if stale_pairs:
                     logger.warning(
@@ -509,7 +486,7 @@ class BotEngine:
         return time.time()
 
     async def _handle_ticker(self, message: Dict[str, Any]) -> None:
-        """Process ticker updates — updates latest price immediately."""
+        """Process ticker updates — updates latest price in-place (no new bars)."""
         try:
             data = message.get("data", [])
             if isinstance(data, list):
@@ -517,19 +494,11 @@ class BotEngine:
                     symbol = tick.get("symbol", "")
                     if symbol:
                         self.market_data.update_ticker(symbol, tick)
-                        # Also push the last price into the OHLC close
-                        # so get_latest_price() returns live data
+                        # S1 FIX: Only update the CLOSE of the current bar in-place.
+                        # NEVER inject fake bars — that destroys ATR, volume, and all indicators.
                         last = tick.get("last")
                         if last and float(last) > 0:
-                            await self.market_data.update_bar(symbol, {
-                                "time": self._parse_ts(tick.get("timestamp", time.time())),
-                                "open": float(last),
-                                "high": float(last),
-                                "low": float(last),
-                                "close": float(last),
-                                "volume": 0,
-                                "vwap": float(last),
-                            })
+                            self.market_data.update_latest_close(symbol, float(last))
         except Exception as e:
             logger.warning("Ticker handler error", error=str(e))
 
@@ -586,10 +555,19 @@ class BotEngine:
         self, signal
     ) -> Dict[str, Any]:
         """Build feature dict for AI predictor from confluence signal."""
-        # Aggregate metadata from strategy signals
+        # S7 FIX: Average overlapping numeric keys instead of overwriting
         metadata = {}
+        counts = {}
         for s in signal.signals:
-            metadata.update(s.metadata)
+            if s.direction == signal.direction:  # Only use agreeing signals
+                for k, v in s.metadata.items():
+                    if k in metadata and isinstance(v, (int, float)) and isinstance(metadata[k], (int, float)):
+                        metadata[k] = metadata[k] + v
+                        counts[k] = counts.get(k, 1) + 1
+                    else:
+                        metadata[k] = v
+        for k in counts:
+            metadata[k] = metadata[k] / counts[k]
 
         features = self.predictor.features.feature_dict_from_signals(
             metadata,

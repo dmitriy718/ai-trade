@@ -120,9 +120,9 @@ class MarketDataCache:
 
             logger.info(
                 "Warmup complete",
-                pair=pair, bars=n_bars, timeframe=timeframe
+                pair=pair, bars=write_idx, timeframe=timeframe
             )
-            return n_bars
+            return write_idx  # S15 FIX: return actual count, not attempted
 
     async def update_bar(self, pair: str, bar: Dict[str, float]) -> None:
         """
@@ -178,6 +178,19 @@ class MarketDataCache:
                     self._data[pair][size] = new_bar
                     self._sizes[pair] = size + 1
 
+            self._last_update[pair] = time.time()
+
+    def update_latest_close(self, pair: str, price: float) -> None:
+        """S1 FIX: Update ONLY the close price of the current (last) bar in-place.
+        Does NOT create a new bar. Keeps all other OHLCV data intact."""
+        size = self._sizes.get(pair, 0)
+        if size > 0 and price > 0:
+            self._data[pair][size - 1][self.COL_CLOSE] = price
+            # Also update high/low if price exceeds current bar's range
+            if price > self._data[pair][size - 1][self.COL_HIGH]:
+                self._data[pair][size - 1][self.COL_HIGH] = price
+            if price < self._data[pair][size - 1][self.COL_LOW]:
+                self._data[pair][size - 1][self.COL_LOW] = price
             self._last_update[pair] = time.time()
 
     def update_ticker(self, pair: str, ticker: Dict[str, Any]) -> None:

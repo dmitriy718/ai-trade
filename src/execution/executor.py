@@ -88,21 +88,12 @@ class TradeExecutor:
         # ENHANCEMENT: Added multi-stage validation
         """
         # Stage 1: Signal validation
+        # (Confluence and confidence gates are handled by the engine scan loop.
+        #  Executor just validates direction and duplicate pair.)
         if signal.direction == SignalDirection.NEUTRAL:
             return None
 
-        # Require at least 2 strategies agreeing (no single-strategy trades)
-        if signal.confluence_count < 2:
-            return None
-
-        # Confidence gate
-        min_conf = 0.50
-        if signal.confidence < min_conf:
-            await self.db.log_thought(
-                "execution",
-                f"Signal rejected: confidence {signal.confidence:.0%} < {min_conf:.0%}",
-                severity="info",
-            )
+        if signal.confidence < 0.40:
             return None
 
         # Block duplicate pair — only one position per pair at a time
@@ -474,8 +465,14 @@ class TradeExecutor:
                     closed = await self.rest_client.get_closed_orders()
                     order_info = closed.get("closed", {}).get(txid, {})
                     if order_info:
-                        # H8 FIX: Reject zero fill prices
+                        # S6 FIX: Try multiple price fields for market orders
                         price = float(order_info.get("price", 0))
+                        if price <= 0:
+                            # Market orders: compute from cost/volume
+                            cost = float(order_info.get("cost", 0))
+                            vol = float(order_info.get("vol_exec", 0))
+                            if cost > 0 and vol > 0:
+                                price = cost / vol
                         return price if price > 0 else None
                     return None
             except Exception:

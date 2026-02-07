@@ -71,7 +71,9 @@ class BreakoutStrategy(BaseStrategy):
         curr_price = closes[-1]
         curr_high = highs[-1]
         curr_low = lows[-1]
-        curr_open = closes[-2]  # Use previous close as proxy for current open
+        # S5 FIX: Use actual opens data when available
+        opens = kwargs.get("opens", closes)
+        curr_open = opens[-1] if len(opens) >= len(closes) else closes[-2]
 
         # Indicators
         atr_vals = atr(highs, lows, closes, 14)

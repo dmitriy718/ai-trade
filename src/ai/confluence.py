@@ -23,6 +23,7 @@ from src.core.logger import get_logger
 from src.exchange.market_data import MarketDataCache
 from src.strategies.base import BaseStrategy, SignalDirection, StrategySignal
 from src.strategies.breakout import BreakoutStrategy
+from src.strategies.keltner import KeltnerStrategy
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.momentum import MomentumStrategy
 from src.strategies.reversal import ReversalStrategy
@@ -112,13 +113,14 @@ class ConfluenceDetector:
         self.obi_threshold = obi_threshold
         self.min_confidence = min_confidence
 
-        # Initialize strategies with config
+        # Initialize strategies — Keltner is our primary high-WR strategy
         self.strategies: List[BaseStrategy] = [
-            TrendStrategy(weight=0.25),
-            MeanReversionStrategy(weight=0.20),
-            MomentumStrategy(weight=0.20),
-            BreakoutStrategy(weight=0.20),
-            ReversalStrategy(weight=0.15),
+            KeltnerStrategy(weight=0.30),
+            TrendStrategy(weight=0.20),
+            MeanReversionStrategy(weight=0.15),
+            MomentumStrategy(weight=0.15),
+            BreakoutStrategy(weight=0.10),
+            ReversalStrategy(weight=0.10),
         ]
 
         self._last_confluence: Dict[str, ConfluenceSignal] = {}
@@ -127,6 +129,7 @@ class ConfluenceDetector:
     def configure_strategies(self, config: Dict[str, Any]) -> None:
         """Configure strategies from config dict."""
         strategy_map = {
+            "keltner": KeltnerStrategy,
             "trend": TrendStrategy,
             "mean_reversion": MeanReversionStrategy,
             "momentum": MomentumStrategy,
@@ -155,7 +158,8 @@ class ConfluenceDetector:
         
         # ENHANCEMENT: Added timeout protection per strategy
         """
-        if not self.market_data.is_warmed_up(pair):
+        # S3 FIX: Also reject stale data — don't trade on outdated prices
+        if not self.market_data.is_warmed_up(pair) or self.market_data.is_stale(pair, max_age_seconds=180):
             return ConfluenceSignal(
                 pair=pair,
                 direction=SignalDirection.NEUTRAL,

@@ -282,6 +282,9 @@ class DashboardServer:
         """Build a WebSocket update payload."""
         if not self._bot_engine:
             return {"type": "status", "data": {"status": "initializing"}}
+        # Guard: DB must be initialized
+        if not self._bot_engine.db or not self._bot_engine.db._initialized:
+            return {"type": "status", "data": {"status": "initializing"}}
 
         # Build compact update
         try:
@@ -289,18 +292,17 @@ class DashboardServer:
             positions = await self._bot_engine.db.get_open_trades()
             thoughts = await self._bot_engine.db.get_thoughts(limit=50)
 
-            # Add current prices to positions
+            # S12 FIX: Add current prices and net unrealized P&L (minus estimated exit fee)
+            FEE_RATE = 0.0026
             for pos in positions:
                 cp = self._bot_engine.market_data.get_latest_price(pos["pair"])
                 if cp > 0:
                     if pos["side"] == "buy":
-                        pos["unrealized_pnl"] = round(
-                            (cp - pos["entry_price"]) * pos["quantity"], 2
-                        )
+                        gross = (cp - pos["entry_price"]) * pos["quantity"]
                     else:
-                        pos["unrealized_pnl"] = round(
-                            (pos["entry_price"] - cp) * pos["quantity"], 2
-                        )
+                        gross = (pos["entry_price"] - cp) * pos["quantity"]
+                    est_exit_fee = abs(cp * pos["quantity"]) * FEE_RATE
+                    pos["unrealized_pnl"] = round(gross - est_exit_fee, 2)
                     pos["current_price"] = cp
 
             scanner_data = {}
