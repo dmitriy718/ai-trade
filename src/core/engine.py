@@ -298,9 +298,9 @@ class BotEngine:
                 )
 
                 # Step 4: Process signals through AI predictor
-                # Require 2+ strategies agreeing before even considering a trade
+                # Require 2+ strategies agreeing, or Keltner solo with good confidence
                 min_confluence = 2
-                exec_confidence = 0.55
+                exec_confidence = 0.50  # Lowered so AI blend doesn't over-reject
 
                 for signal in confluence_signals:
                     if signal.direction == SignalDirection.NEUTRAL:
@@ -310,8 +310,12 @@ class BotEngine:
                     prediction_features = self._build_prediction_features(signal)
                     ai_confidence = self.predictor.predict(prediction_features)
 
-                    # Apply AI confidence to signal
-                    signal.confidence = (signal.confidence + ai_confidence) / 2
+                    # Blend: for solo signals let strategy dominate so we get some trades
+                    pre_blend = signal.confidence
+                    if signal.confluence_count == 1:
+                        signal.confidence = 0.7 * pre_blend + 0.3 * ai_confidence
+                    else:
+                        signal.confidence = (pre_blend + ai_confidence) / 2
 
                     # Log ALL analysis thoughts so dashboard shows activity
                     await self.db.log_thought(
@@ -327,17 +331,17 @@ class BotEngine:
                     )
 
                     # Determine if we should trade this signal:
-                    # - Normal: need 2+ strategies agreeing (confluence >= 2)
-                    # - Keltner solo: it has 3 internal confirmations (KC + MACD + RSI)
-                    #   so treat it as self-sufficient when confidence is high
+                    # - Normal: 2+ strategies agreeing (confluence >= 2)
+                    # - Solo: Keltner with conf >= 0.52, or any strategy with conf >= 0.55 (get flow)
                     has_keltner = any(
                         s.strategy_name == "keltner" and s.is_actionable
                         for s in signal.signals
                         if s.direction == signal.direction
                     )
-                    keltner_solo_ok = has_keltner and signal.confidence >= 0.60
+                    keltner_solo_ok = has_keltner and signal.confidence >= 0.52
+                    any_solo_ok = signal.confluence_count == 1 and signal.confidence >= 0.55
 
-                    if signal.confluence_count < min_confluence and not keltner_solo_ok:
+                    if signal.confluence_count < min_confluence and not keltner_solo_ok and not any_solo_ok:
                         continue
 
                     # Execute if meets threshold
