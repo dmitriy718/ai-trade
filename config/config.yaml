@@ -1,0 +1,126 @@
+# ============================================
+# AI Trading Bot - Master Configuration
+# ============================================
+
+app:
+  name: "AI Crypto Trading Bot"
+  version: "2.0.0"
+  mode: "paper"  # paper | live
+  log_level: "INFO"
+
+exchange:
+  name: "kraken"
+  ws_url: "wss://ws.kraken.com/v2"
+  ws_auth_url: "wss://ws-auth.kraken.com/v2"
+  rest_url: "https://api.kraken.com"
+  rate_limit_per_second: 15
+  max_retries: 5
+  retry_base_delay: 1.0
+  timeout: 30
+
+trading:
+  pairs:
+    - "BTC/USD"
+    - "ETH/USD"
+    - "SOL/USD"
+    - "XRP/USD"
+    - "ADA/USD"
+    - "DOT/USD"
+    - "AVAX/USD"
+    - "LINK/USD"
+  scan_interval_seconds: 60
+  hft_scan_interval_seconds: 1
+  warmup_bars: 720     # 12 hours of 1-min data for indicator convergence
+  warmup_timeframe: "1m"
+  max_concurrent_positions: 5
+  cooldown_seconds: 300
+
+strategies:
+  # Tuned for 1-MINUTE candles — longer periods to filter noise
+  trend:
+    enabled: true
+    ema_fast: 20        # ~20 min fast EMA (was 5)
+    ema_slow: 50        # ~50 min slow EMA (was 13)
+    adx_threshold: 30   # Stricter trend filter (was 25)
+    weight: 0.25
+  mean_reversion:
+    enabled: true
+    bb_period: 50       # 50-min Bollinger (was 20)
+    bb_std: 2.5         # Wider bands = fewer false signals
+    rsi_oversold: 25    # More extreme = higher conviction (was 30)
+    rsi_overbought: 75  # (was 70)
+    weight: 0.20
+  momentum:
+    enabled: true
+    rsi_threshold: 55   # Slight bias to confirm direction (was 50)
+    volume_multiplier: 2.0  # Stronger volume burst needed (was 1.5)
+    weight: 0.20
+  breakout:
+    enabled: true
+    lookback_period: 60  # 1-hour S/R levels (was 20)
+    volume_confirmation: 1.8  # (was 1.3)
+    weight: 0.20
+  reversal:
+    enabled: true
+    rsi_extreme_low: 15   # Very extreme only (was 20)
+    rsi_extreme_high: 85  # (was 80)
+    confirmation_candles: 5  # More confirmation bars (was 3)
+    weight: 0.15
+
+ai:
+  confluence_threshold: 2  # Min strategies that must agree
+  min_confidence: 0.55
+  tflite_model_path: "models/trade_predictor.tflite"
+  order_book_depth: 25
+  obi_threshold: 0.15  # Order Book Imbalance threshold
+  whale_threshold_usd: 50000
+
+risk:
+  max_risk_per_trade: 0.02  # 2% of bankroll
+  max_daily_loss: 0.05      # 5% max daily drawdown
+  max_position_usd: 500.0
+  atr_multiplier_sl: 2.0
+  atr_multiplier_tp: 3.0
+  trailing_activation_pct: 0.015  # 1.5% profit to activate trailing
+  trailing_step_pct: 0.005        # 0.5% trailing step
+  breakeven_activation_pct: 0.01  # 1% profit to move SL to breakeven
+  kelly_fraction: 0.25            # Quarter-Kelly for safety
+  max_kelly_size: 0.10            # Never more than 10% of bankroll
+  risk_of_ruin_threshold: 0.01    # 1% acceptable risk of ruin
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8080
+  thought_feed_max: 200
+  refresh_interval_ms: 1000
+
+ml:
+  retrain_interval_hours: 168  # Weekly
+  min_samples: 10000
+  epochs: 50
+  batch_size: 64
+  validation_split: 0.2
+  features:
+    - "rsi"
+    - "ema_ratio"
+    - "bb_position"
+    - "adx"
+    - "volume_ratio"
+    - "obi"
+    - "atr_pct"
+    - "momentum_score"
+    - "trend_strength"
+    - "spread_pct"
+
+monitoring:
+  health_check_interval: 30
+  auto_restart: true
+  max_restart_attempts: 10
+  heartbeat_interval: 10
+  metrics_retention_hours: 72
+
+stress_test:
+  duration_hours: 72
+  crash_interval_minutes: 30
+  network_drop_duration_seconds: 10
+  cpu_spike_duration_seconds: 5

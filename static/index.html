@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Bot - Command Center</title>
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Rajdhani:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Animated Background -->
+    <div class="bg-grid"></div>
+    <div class="scan-line"></div>
+
+    <!-- Header HUD -->
+    <header class="hud-header">
+        <div class="hud-left">
+            <div class="logo">
+                <span class="logo-icon">◆</span>
+                <span class="logo-text">AI TRADER</span>
+                <span class="logo-version">v2.0</span>
+            </div>
+            <div class="status-indicator" id="statusIndicator">
+                <span class="pulse"></span>
+                <span class="status-text" id="statusText">CONNECTING...</span>
+            </div>
+        </div>
+        <div class="hud-center">
+            <div class="hud-stat">
+                <span class="hud-label">MODE</span>
+                <span class="hud-value" id="tradingMode">--</span>
+            </div>
+            <div class="hud-stat">
+                <span class="hud-label">UPTIME</span>
+                <span class="hud-value" id="uptime">00:00:00</span>
+            </div>
+            <div class="hud-stat">
+                <span class="hud-label">SCAN #</span>
+                <span class="hud-value" id="scanCount">0</span>
+            </div>
+        </div>
+        <div class="hud-right">
+            <button class="control-btn pause-btn" id="pauseBtn" onclick="togglePause()">⏸ PAUSE</button>
+            <button class="control-btn danger-btn" id="closeAllBtn" onclick="closeAll()">⚠ CLOSE ALL</button>
+        </div>
+    </header>
+
+    <!-- Main Grid -->
+    <main class="dashboard-grid">
+
+        <!-- PnL Card -->
+        <section class="glass-card pnl-card">
+            <div class="card-header">
+                <h2>💰 PORTFOLIO</h2>
+            </div>
+            <div class="pnl-display">
+                <div class="pnl-main">
+                    <span class="pnl-label">Total P&L</span>
+                    <span class="pnl-value" id="totalPnl">$0.00</span>
+                </div>
+                <div class="pnl-grid">
+                    <div class="pnl-item">
+                        <span class="label">Unrealized</span>
+                        <span class="value" id="unrealizedPnl">$0.00</span>
+                    </div>
+                    <div class="pnl-item">
+                        <span class="label">Realized</span>
+                        <span class="value" id="todayPnl">$0.00</span>
+                    </div>
+                    <div class="pnl-item">
+                        <span class="label">Win Rate</span>
+                        <span class="value" id="winRate">0%</span>
+                    </div>
+                    <div class="pnl-item">
+                        <span class="label">Trades</span>
+                        <span class="value" id="totalTrades">0</span>
+                    </div>
+                    <div class="pnl-item">
+                        <span class="label">Open Pos</span>
+                        <span class="value" id="openPositions">0</span>
+                    </div>
+                    <div class="pnl-item">
+                        <span class="label">Drawdown</span>
+                        <span class="value" id="drawdown">0%</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- AI Thought Feed -->
+        <section class="glass-card thought-card">
+            <div class="card-header">
+                <h2>🧠 AI THOUGHT LOG</h2>
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <span class="live-dot" id="liveDot" title="Auto-scrolling to latest"></span>
+                    <span class="badge" id="thoughtCount">0</span>
+                </div>
+            </div>
+            <div class="thought-feed" id="thoughtFeed">
+                <div class="thought-item loading">
+                    <span class="thought-time">--:--:--</span>
+                    <span class="thought-msg">Waiting for AI thoughts...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Active Positions -->
+        <section class="glass-card positions-card">
+            <div class="card-header">
+                <h2>📊 ACTIVE POSITIONS</h2>
+            </div>
+            <div class="positions-table" id="positionsTable">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>PAIR</th>
+                            <th>SIDE</th>
+                            <th>ENTRY</th>
+                            <th>CURRENT</th>
+                            <th>P&L</th>
+                            <th>STOP</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positionsBody">
+                        <tr class="empty-row">
+                            <td colspan="6">No open positions</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Algo Pulse (Strategy Monitor) -->
+        <section class="glass-card strategy-card">
+            <div class="card-header">
+                <h2>⚡ ALGO PULSE</h2>
+            </div>
+            <div class="strategy-grid" id="strategyGrid">
+                <div class="strategy-item">
+                    <span class="strategy-name">TREND</span>
+                    <div class="strategy-bar"><div class="bar-fill" id="trendBar" style="width:0%"></div></div>
+                    <span class="strategy-stat" id="trendStat">--</span>
+                </div>
+                <div class="strategy-item">
+                    <span class="strategy-name">MEAN REV</span>
+                    <div class="strategy-bar"><div class="bar-fill" id="meanrevBar" style="width:0%"></div></div>
+                    <span class="strategy-stat" id="meanrevStat">--</span>
+                </div>
+                <div class="strategy-item">
+                    <span class="strategy-name">MOMENTUM</span>
+                    <div class="strategy-bar"><div class="bar-fill" id="momentumBar" style="width:0%"></div></div>
+                    <span class="strategy-stat" id="momentumStat">--</span>
+                </div>
+                <div class="strategy-item">
+                    <span class="strategy-name">BREAKOUT</span>
+                    <div class="strategy-bar"><div class="bar-fill" id="breakoutBar" style="width:0%"></div></div>
+                    <span class="strategy-stat" id="breakoutStat">--</span>
+                </div>
+                <div class="strategy-item">
+                    <span class="strategy-name">REVERSAL</span>
+                    <div class="strategy-bar"><div class="bar-fill" id="reversalBar" style="width:0%"></div></div>
+                    <span class="strategy-stat" id="reversalStat">--</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Ticker Scanner -->
+        <section class="glass-card scanner-card">
+            <div class="card-header">
+                <h2>📡 TICKER SCANNER</h2>
+            </div>
+            <div class="scanner-grid" id="scannerGrid">
+                <!-- Populated dynamically -->
+            </div>
+        </section>
+
+        <!-- Risk Monitor -->
+        <section class="glass-card risk-card">
+            <div class="card-header">
+                <h2>🛡️ RISK SHIELD</h2>
+            </div>
+            <div class="risk-grid">
+                <div class="risk-item">
+                    <span class="label">Risk of Ruin</span>
+                    <div class="risk-gauge">
+                        <div class="gauge-fill" id="rorGauge" style="width:0%"></div>
+                    </div>
+                    <span class="risk-value" id="rorValue">0%</span>
+                </div>
+                <div class="risk-item">
+                    <span class="label">Daily Loss</span>
+                    <div class="risk-gauge">
+                        <div class="gauge-fill" id="dailyLossGauge" style="width:0%"></div>
+                    </div>
+                    <span class="risk-value" id="dailyLossValue">$0.00</span>
+                </div>
+                <div class="risk-item">
+                    <span class="label">Exposure</span>
+                    <div class="risk-gauge">
+                        <div class="gauge-fill" id="exposureGauge" style="width:0%"></div>
+                    </div>
+                    <span class="risk-value" id="exposureValue">$0.00</span>
+                </div>
+                <div class="risk-item">
+                    <span class="label">DD Factor</span>
+                    <span class="risk-value large" id="ddFactor">1.0x</span>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
