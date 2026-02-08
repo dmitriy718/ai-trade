@@ -581,24 +581,26 @@ class DatabaseManager:
     # Performance Stats
     # ------------------------------------------------------------------
 
-    async def get_performance_stats(self) -> Dict[str, Any]:
-        """Get aggregate performance statistics."""
+    async def get_performance_stats(
+        self, tenant_id: Optional[str] = "default"
+    ) -> Dict[str, Any]:
+        """Get aggregate performance statistics. Optional tenant_id for multi-tenant."""
         stats = {}
+        tc = " AND (tenant_id = ? OR tenant_id IS NULL)" if tenant_id else ""
+        p: tuple = (tenant_id,) if tenant_id else ()
 
-        # Total P&L
         cursor = await self._db.execute(
-            "SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status = 'closed'"
+            f"SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status = 'closed'{tc}", p
         )
         row = await cursor.fetchone()
         stats["total_pnl"] = row[0] if row else 0.0
 
-        # Trade counts
         cursor = await self._db.execute(
-            """SELECT 
-                COUNT(*) as total,
+            f"""SELECT COUNT(*) as total,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
                 SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses
-            FROM trades WHERE status = 'closed'"""
+            FROM trades WHERE status = 'closed'{tc}""",
+            p,
         )
         row = await cursor.fetchone()
         stats["total_trades"] = row[0] if row else 0
@@ -609,35 +611,106 @@ class DatabaseManager:
             if stats["total_trades"] > 0 else 0.0
         )
 
-        # Average win/loss
         cursor = await self._db.execute(
-            "SELECT AVG(pnl) FROM trades WHERE status = 'closed' AND pnl > 0"
+            f"SELECT AVG(pnl) FROM trades WHERE status = 'closed' AND pnl > 0{tc}", p
         )
         row = await cursor.fetchone()
         stats["avg_win"] = row[0] if row and row[0] else 0.0
 
         cursor = await self._db.execute(
-            "SELECT AVG(pnl) FROM trades WHERE status = 'closed' AND pnl <= 0"
+            f"SELECT AVG(pnl) FROM trades WHERE status = 'closed' AND pnl <= 0{tc}", p
         )
         row = await cursor.fetchone()
         stats["avg_loss"] = row[0] if row and row[0] else 0.0
 
-        # Open positions
         cursor = await self._db.execute(
-            "SELECT COUNT(*) FROM trades WHERE status = 'open'"
+            f"SELECT COUNT(*) FROM trades WHERE status = 'open'{tc}", p
         )
         row = await cursor.fetchone()
         stats["open_positions"] = row[0] if row else 0
 
-        # Today's P&L
         cursor = await self._db.execute(
-            """SELECT COALESCE(SUM(pnl), 0) FROM trades
-            WHERE status = 'closed' AND date(exit_time) = date('now')"""
+            f"""SELECT COALESCE(SUM(pnl), 0) FROM trades
+            WHERE status = 'closed' AND date(exit_time) = date('now'){tc}""",
+            p,
         )
         row = await cursor.fetchone()
         stats["today_pnl"] = row[0] if row else 0.0
 
         return stats
+
+    # ------------------------------------------------------------------
+    # Tenants (multi-tenant / Stripe)
+    # ------------------------------------------------------------------
+
+    async def get_tenant(self, tenant_id: str) -> Optional[Dict[str, Any]]:
+        """Get tenant by id."""
+        cursor = await self._db.execute(
+            "SELECT id, name, stripe_customer_id, stripe_subscription_id, status, created_at FROM tenants WHERE id = ?",
+            (tenant_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "name": row[1],
+            "stripe_customer_id": row[2],
+            "stripe_subscription_id": row[3],
+            "status": row[4],
+            "created_at": row[5],
+        }
+
+    async def upsert_tenant(
+        self,
+        tenant_id: str,
+        name: str,
+        *,
+        stripe_customer_id: Optional[str] = None,
+        stripe_subscription_id: Optional[str] = None,
+        status: str = "active",
+    ) -> None:
+        """Create or update tenant."""
+        async with self._lock:
+            await self._db.execute(
+                """INSERT INTO tenants (id, name, stripe_customer_id, stripe_subscription_id, status, updated_at)
+                   VALUES (?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(id) DO UPDATE SET
+                     name = excluded.name,
+                     stripe_customer_id = COALESCE(excluded.stripe_customer_id, stripe_customer_id),
+                     stripe_subscription_id = COALESCE(excluded.stripe_subscription_id, stripe_subscription_id),
+                     status = excluded.status,
+                     updated_at = datetime('now')""",
+                (tenant_id, name, stripe_customer_id, stripe_subscription_id, status),
+            )
+            await self._db.commit()
+
+    async def set_tenant_status(self, tenant_id: str, status: str) -> None:
+        """Update tenant subscription status (active, past_due, canceled, etc.)."""
+        async with self._lock:
+            await self._db.execute(
+                "UPDATE tenants SET status = ?, updated_at = datetime('now') WHERE id = ?",
+                (status, tenant_id),
+            )
+            await self._db.commit()
+
+    async def get_tenant_by_stripe_customer(self, stripe_customer_id: str) -> Optional[Dict[str, Any]]:
+        """Get tenant by Stripe customer id."""
+        cursor = await self._db.execute(
+            "SELECT id FROM tenants WHERE stripe_customer_id = ?",
+            (stripe_customer_id,),
+        )
+        row = await cursor.fetchone()
+        return await self.get_tenant(row[0]) if row else None
+
+    async def get_tenant_by_stripe_subscription(self, stripe_subscription_id: str) -> Optional[Dict[str, Any]]:
+        """Get tenant by Stripe subscription id."""
+        cursor = await self._db.execute(
+            "SELECT id FROM tenants WHERE stripe_subscription_id = ?",
+            (stripe_subscription_id,),
+        )
+        row = await cursor.fetchone()
+        return await self.get_tenant(row[0]) if row else None
 
     # ------------------------------------------------------------------
     # Cleanup & Close

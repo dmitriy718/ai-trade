@@ -195,6 +195,20 @@ class BotEngine:
         self.dashboard = DashboardServer()
         self.dashboard.set_bot_engine(self)
 
+        # Billing (Stripe) - optional
+        billing = getattr(self.config, "billing", None)
+        if billing and getattr(billing.stripe, "enabled", False):
+            from src.billing.stripe_service import StripeService
+            stripe_cfg = billing.stripe
+            stripe_svc = StripeService(
+                secret_key=stripe_cfg.secret_key,
+                webhook_secret=stripe_cfg.webhook_secret,
+                price_id=stripe_cfg.price_id,
+                currency=stripe_cfg.currency,
+                db=self.db,
+            )
+            self.dashboard.set_stripe_service(stripe_svc)
+
         await self.db.log_thought(
             "system",
             f"Bot initialized in {self.mode.upper()} mode | "
