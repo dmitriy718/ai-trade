@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -67,16 +67,25 @@ class DashboardServer:
         self._ws_connections: Set[WebSocket] = set()
         self._bot_engine = None
         self._control_router = None
+        self._stripe_service = None
         self._ws_cache: Optional[Dict[str, Any]] = None
         self._ws_cache_time: float = 0
 
     def set_bot_engine(self, engine) -> None:
         """Inject the bot engine reference."""
         self._bot_engine = engine
+        if self._stripe_service and engine and getattr(engine, "db", None):
+            self._stripe_service.set_db(engine.db)
 
     def set_control_router(self, router) -> None:
         """Inject the control router for pause/resume/close_all."""
         self._control_router = router
+
+    def set_stripe_service(self, service) -> None:
+        """Inject Stripe service for billing endpoints."""
+        self._stripe_service = service
+        if self._bot_engine and getattr(self._bot_engine, "db", None):
+            service.set_db(self._bot_engine.db)
 
     def _setup_middleware(self) -> None:
         """Configure CORS and security middleware."""
@@ -261,6 +270,58 @@ class DashboardServer:
             if "weighted_order_book" in body:
                 c.obi_counts_as_confluence = bool(body["weighted_order_book"])
             return {"weighted_order_book": c.obi_counts_as_confluence}
+
+        # ---- Billing (Stripe) ----
+        @self.app.post("/api/v1/billing/checkout", dependencies=[Depends(_require_auth)])
+        async def create_checkout_session(body: dict = Body(...)):
+            """Create Stripe Checkout session for subscription. Body: tenant_id, success_url, cancel_url, customer_email (optional)."""
+            if not self._stripe_service or not self._stripe_service.enabled:
+                raise HTTPException(status_code=503, detail="Billing not configured")
+            tenant_id = body.get("tenant_id") or "default"
+            success_url = body.get("success_url", "")
+            cancel_url = body.get("cancel_url", "")
+            if not success_url or not cancel_url:
+                raise HTTPException(status_code=400, detail="success_url and cancel_url required")
+            customer_email = body.get("customer_email")
+            customer_id = None
+            if self._bot_engine and self._bot_engine.db:
+                tenant = await self._bot_engine.db.get_tenant(tenant_id)
+                customer_id = tenant.get("stripe_customer_id") if tenant else None
+            result = self._stripe_service.create_checkout_session(
+                tenant_id=tenant_id,
+                success_url=success_url,
+                cancel_url=cancel_url,
+                customer_email=customer_email,
+                customer_id=customer_id,
+            )
+            if not result:
+                raise HTTPException(status_code=500, detail="Failed to create checkout session")
+            return result
+
+        @self.app.post("/api/v1/billing/webhook")
+        async def stripe_webhook(request: Request, stripe_signature: Optional[str] = Header(None, alias="Stripe-Signature")):
+            """Stripe webhook: verify signature and update tenant status. No auth (verified by Stripe signature)."""
+            if not self._stripe_service or not self._stripe_service.webhook_secret:
+                raise HTTPException(status_code=503, detail="Webhook not configured")
+            payload = await request.body()
+            if not stripe_signature:
+                raise HTTPException(status_code=400, detail="Missing Stripe-Signature header")
+            if not self._stripe_service.verify_webhook(payload, stripe_signature):
+                raise HTTPException(status_code=400, detail="Invalid signature")
+            import json as _json
+            event = _json.loads(payload)
+            await self._stripe_service.handle_webhook_event(event)
+            return {"received": True}
+
+        @self.app.get("/api/v1/tenants/{tenant_id}")
+        async def get_tenant(tenant_id: str):
+            """Get tenant by id (for dashboard / billing status)."""
+            if not self._bot_engine or not self._bot_engine.db:
+                raise HTTPException(status_code=503, detail="Not available")
+            tenant = await self._bot_engine.db.get_tenant(tenant_id)
+            if not tenant:
+                raise HTTPException(status_code=404, detail="Tenant not found")
+            return tenant
 
         # ---- Control Endpoints ----
 
