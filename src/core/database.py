@@ -52,6 +52,7 @@ class DatabaseManager:
         await self._db.execute("PRAGMA mmap_size=268435456")  # 256MB mmap
 
         await self._create_schema()
+        await self._run_tenant_migrations()
         self._initialized = True
 
     async def _create_schema(self) -> None:
@@ -151,6 +152,27 @@ class DatabaseManager:
             updated_at TEXT DEFAULT (datetime('now'))
         );
 
+        -- Tenants (for multi-tenant / licensed SaaS)
+        CREATE TABLE IF NOT EXISTS tenants (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            stripe_customer_id TEXT,
+            stripe_subscription_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active', 'past_due', 'canceled', 'trialing', 'incomplete')),
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
+        -- API keys -> tenant (for tenant resolution)
+        CREATE TABLE IF NOT EXISTS tenant_api_keys (
+            api_key_hash TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            label TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+        );
+
         -- Daily performance summary
         CREATE TABLE IF NOT EXISTS daily_summary (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,6 +205,32 @@ class DatabaseManager:
         await self._db.executescript(schema_sql)
         await self._db.commit()
 
+    async def _run_tenant_migrations(self) -> None:
+        """Add tenant_id to tenant-scoped tables (idempotent)."""
+        tables_columns = [
+            ("trades", "tenant_id", "TEXT DEFAULT 'default'"),
+            ("thought_log", "tenant_id", "TEXT DEFAULT 'default'"),
+            ("signals", "tenant_id", "TEXT DEFAULT 'default'"),
+            ("ml_features", "tenant_id", "TEXT DEFAULT 'default'"),
+            ("daily_summary", "tenant_id", "TEXT DEFAULT 'default'"),
+        ]
+        for table, column, col_def in tables_columns:
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {col_def}"
+                )
+                await self._db.commit()
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+                await self._db.rollback()
+        # Ensure default tenant exists
+        await self._db.execute(
+            """INSERT OR IGNORE INTO tenants (id, name, status)
+               VALUES ('default', 'Default', 'active')"""
+        )
+        await self._db.commit()
+
     # ------------------------------------------------------------------
     # Trade Operations
     # ------------------------------------------------------------------
@@ -196,22 +244,25 @@ class DatabaseManager:
         if not self._initialized or self._db is None:
             raise RuntimeError("Database not initialized. Call initialize() first.")
 
-    async def insert_trade(self, trade: Dict[str, Any]) -> int:
-        """Insert a new trade record."""
+    async def insert_trade(
+        self, trade: Dict[str, Any], tenant_id: Optional[str] = "default"
+    ) -> int:
+        """Insert a new trade record. Optional tenant_id for multi-tenant."""
         self._ensure_ready()
         async with self._lock:
             cursor = await self._db.execute(
                 """INSERT INTO trades 
                 (trade_id, pair, side, entry_price, quantity, status, strategy,
-                 confidence, stop_loss, take_profit, entry_time, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 confidence, stop_loss, take_profit, entry_time, metadata, tenant_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     trade["trade_id"], trade["pair"], trade["side"],
                     trade["entry_price"], trade["quantity"], trade.get("status", "open"),
                     trade["strategy"], trade.get("confidence"),
                     trade.get("stop_loss"), trade.get("take_profit"),
                     trade.get("entry_time", self._ts()),
-                    json.dumps(trade.get("metadata", {}))
+                    json.dumps(trade.get("metadata", {})),
+                    tenant_id or "default",
                 )
             )
             await self._db.commit()
@@ -278,26 +329,39 @@ class DatabaseManager:
             )
             await self._db.commit()
 
-    async def get_open_trades(self, pair: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get all open trades, optionally filtered by pair."""
+    async def get_open_trades(
+        self,
+        pair: Optional[str] = None,
+        tenant_id: Optional[str] = "default",
+    ) -> List[Dict[str, Any]]:
+        """Get all open trades, optionally filtered by pair and tenant."""
         sql = "SELECT * FROM trades WHERE status = 'open'"
-        params: tuple = ()
+        params: List[Any] = []
+        if tenant_id:
+            sql += " AND (tenant_id = ? OR tenant_id IS NULL)"
+            params.append(tenant_id)
         if pair:
             sql += " AND pair = ?"
-            params = (pair,)
+            params.append(pair)
         sql += " ORDER BY entry_time DESC"
 
-        cursor = await self._db.execute(sql, params)
+        cursor = await self._db.execute(sql, tuple(params) if params else ())
         columns = [description[0] for description in cursor.description]
         rows = await cursor.fetchall()
         return [dict(zip(columns, row)) for row in rows]
 
     async def get_trade_history(
-        self, limit: int = 100, pair: Optional[str] = None
+        self,
+        limit: int = 100,
+        pair: Optional[str] = None,
+        tenant_id: Optional[str] = "default",
     ) -> List[Dict[str, Any]]:
-        """Get closed trade history."""
+        """Get closed trade history. Optional tenant_id for multi-tenant."""
         sql = "SELECT * FROM trades WHERE status = 'closed'"
         params: List[Any] = []
+        if tenant_id:
+            sql += " AND (tenant_id = ? OR tenant_id IS NULL)"
+            params.append(tenant_id)
         if pair:
             sql += " AND pair = ?"
             params.append(pair)
@@ -365,29 +429,47 @@ class DatabaseManager:
     # ------------------------------------------------------------------
 
     async def log_thought(
-        self, category: str, message: str,
-        severity: str = "info", metadata: Optional[Dict] = None
+        self,
+        category: str,
+        message: str,
+        severity: str = "info",
+        metadata: Optional[Dict] = None,
+        tenant_id: Optional[str] = "default",
     ) -> None:
-        """Log an AI thought/decision for the dashboard."""
+        """Log an AI thought/decision for the dashboard. Optional tenant_id."""
         async with self._lock:
             await self._db.execute(
-                """INSERT INTO thought_log (timestamp, category, message, severity, metadata)
-                VALUES (?, ?, ?, ?, ?)""",
+                """INSERT INTO thought_log (timestamp, category, message, severity, metadata, tenant_id)
+                VALUES (?, ?, ?, ?, ?, ?)""",
                 (
                     datetime.now(timezone.utc).isoformat(),
-                    category, message, severity,
-                    json.dumps(metadata or {})
+                    category,
+                    message,
+                    severity,
+                    json.dumps(metadata or {}),
+                    tenant_id or "default",
                 )
             )
             await self._db.commit()
 
-    async def get_thoughts(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get recent AI thoughts for dashboard display."""
-        cursor = await self._db.execute(
-            """SELECT timestamp, category, message, severity, metadata
-            FROM thought_log ORDER BY id DESC LIMIT ?""",
-            (limit,)
-        )
+    async def get_thoughts(
+        self, limit: int = 50, tenant_id: Optional[str] = "default"
+    ) -> List[Dict[str, Any]]:
+        """Get recent AI thoughts for dashboard. Optional tenant_id."""
+        if tenant_id:
+            cursor = await self._db.execute(
+                """SELECT timestamp, category, message, severity, metadata
+                FROM thought_log
+                WHERE tenant_id = ? OR tenant_id IS NULL
+                ORDER BY id DESC LIMIT ?""",
+                (tenant_id, limit),
+            )
+        else:
+            cursor = await self._db.execute(
+                """SELECT timestamp, category, message, severity, metadata
+                FROM thought_log ORDER BY id DESC LIMIT ?""",
+                (limit,),
+            )
         columns = ["timestamp", "category", "message", "severity", "metadata"]
         rows = await cursor.fetchall()
         results = []

@@ -1,4 +1,7 @@
-# AI Trading Bot - Production Dependencies
+# Minimal dependencies for Raspberry Pi (no TensorFlow).
+# The bot runs with heuristic predictor fallback; TFLite model is skipped.
+# Use: pip install -r requirements-pi.txt
+
 # Core Framework
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
@@ -10,10 +13,6 @@ aiohttp==3.11.11
 pandas>=2.2.0,<3
 numpy>=1.26.0,<2
 ta==0.11.0
-
-# Machine Learning (use flexible version for Raspberry Pi / ARM; 2.16.x on x86, 2.20.x on Pi)
-tensorflow>=2.16.2,<2.21
-scikit-learn==1.6.0
 
 # Database
 aiosqlite==0.20.0
@@ -37,13 +36,6 @@ asyncio-throttle==1.0.2
 # Telegram Bot (optional)
 python-telegram-bot==21.9
 
-# Billing (Stripe)
-stripe>=8.0.0,<10
-
-# Testing
-pytest==8.3.4
-pytest-asyncio==0.25.0
-pytest-cov==6.0.0
-
-# Type checking
-mypy==1.14.1
+# Optional: uncomment if you have a working TensorFlow wheel for your Pi/Python
+# tensorflow>=2.16.2,<2.21
+# scikit-learn==1.6.0

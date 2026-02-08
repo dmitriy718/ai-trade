@@ -107,11 +107,15 @@ class ConfluenceDetector:
         confluence_threshold: int = 3,
         obi_threshold: float = 0.15,
         min_confidence: float = 0.65,
+        obi_counts_as_confluence: bool = True,
+        obi_weight: float = 0.4,
     ):
         self.market_data = market_data
         self.confluence_threshold = confluence_threshold
         self.obi_threshold = obi_threshold
         self.min_confidence = min_confidence
+        self.obi_counts_as_confluence = obi_counts_as_confluence
+        self.obi_weight = obi_weight
 
         # Initialize strategies — Keltner is our primary high-WR strategy
         self.strategies: List[BaseStrategy] = [
@@ -126,8 +130,10 @@ class ConfluenceDetector:
         self._last_confluence: Dict[str, ConfluenceSignal] = {}
         self._signal_history: List[ConfluenceSignal] = []
 
-    def configure_strategies(self, config: Dict[str, Any]) -> None:
-        """Configure strategies from config dict."""
+    def configure_strategies(
+        self, config: Dict[str, Any], single_strategy_mode: Optional[str] = None
+    ) -> None:
+        """Configure strategies from config dict. If single_strategy_mode is set, only that strategy runs."""
         strategy_map = {
             "keltner": KeltnerStrategy,
             "trend": TrendStrategy,
@@ -138,10 +144,15 @@ class ConfluenceDetector:
         }
 
         self.strategies = []
-        for name, cls in strategy_map.items():
+        names_to_build = (
+            [single_strategy_mode]
+            if single_strategy_mode and single_strategy_mode in strategy_map
+            else strategy_map.keys()
+        )
+        for name in names_to_build:
+            cls = strategy_map[name]
             strat_config = config.get(name, {})
             if strat_config.get("enabled", True):
-                # Filter constructor args
                 import inspect
                 sig = inspect.signature(cls.__init__)
                 valid_params = {
@@ -233,18 +244,71 @@ class ConfluenceDetector:
         long_signals = [s for s in signals if s.direction == SignalDirection.LONG and s.is_actionable]
         short_signals = [s for s in signals if s.direction == SignalDirection.SHORT and s.is_actionable]
 
+        # Order Book Imbalance: compute early for synthetic signal
+        order_book = self.market_data.get_order_book(pair)
+        obi = 0.0
+        obi_agrees_long = False
+        obi_agrees_short = False
+        if order_book:
+            bids = order_book.get("bids", [])
+            asks = order_book.get("asks", [])
+            if bids and asks:
+                try:
+                    bid_vol = sum(float(b[1]) for b in bids[:10] if len(b) > 1)
+                    ask_vol = sum(float(a[1]) for a in asks[:10] if len(a) > 1)
+                except (ValueError, TypeError, IndexError):
+                    bid_vol = 0.0
+                    ask_vol = 0.0
+                obi = order_book_imbalance(bid_vol, ask_vol)
+                obi_agrees_long = obi > self.obi_threshold
+                obi_agrees_short = obi < -self.obi_threshold
+
+        # OBI heavy weight: add synthetic "order_book" signal so OBI + 1 strategy = 2 = tradable
+        if self.obi_counts_as_confluence:
+            entry_price = self.market_data.get_latest_price(pair) or 0.0
+            synthetic_strength = 0.7
+            synthetic_confidence = 0.7
+            if obi_agrees_long:
+                long_signals.append(
+                    StrategySignal(
+                        strategy_name="order_book",
+                        pair=pair,
+                        direction=SignalDirection.LONG,
+                        strength=synthetic_strength,
+                        confidence=synthetic_confidence,
+                        entry_price=entry_price,
+                        stop_loss=0.0,
+                        take_profit=0.0,
+                    )
+                )
+            if obi_agrees_short:
+                short_signals.append(
+                    StrategySignal(
+                        strategy_name="order_book",
+                        pair=pair,
+                        direction=SignalDirection.SHORT,
+                        strength=synthetic_strength,
+                        confidence=synthetic_confidence,
+                        entry_price=entry_price,
+                        stop_loss=0.0,
+                        take_profit=0.0,
+                    )
+                )
+
         long_count = len(long_signals)
         short_count = len(short_signals)
 
-        # Determine majority direction
+        # Determine majority direction (obi_agrees set per direction below)
         if long_count > short_count and long_count >= 1:
             direction = SignalDirection.LONG
             directional_signals = long_signals
             confluence_count = long_count
+            obi_agrees = obi_agrees_long
         elif short_count > long_count and short_count >= 1:
             direction = SignalDirection.SHORT
             directional_signals = short_signals
             confluence_count = short_count
+            obi_agrees = obi_agrees_short
         else:
             return ConfluenceSignal(
                 pair=pair,
@@ -281,32 +345,11 @@ class ConfluenceDetector:
         confluence_bonus = min((confluence_count - 1) * 0.1, 0.3)
         weighted_confidence = min(weighted_confidence + confluence_bonus, 1.0)
 
-        # Order Book Imbalance analysis
-        order_book = self.market_data.get_order_book(pair)
-        obi = 0.0
-        obi_agrees = False
+        # Legacy: when OBI is not counted as confluence, still add small confidence bump when it agrees
+        if not self.obi_counts_as_confluence and obi_agrees:
+            weighted_confidence = min(weighted_confidence + 0.05, 1.0)
 
-        if order_book:
-            bids = order_book.get("bids", [])
-            asks = order_book.get("asks", [])
-            if bids and asks:
-                # M26 FIX: Safe parsing of order book entries
-                try:
-                    bid_vol = sum(float(b[1]) for b in bids[:10] if len(b) > 1)
-                    ask_vol = sum(float(a[1]) for a in asks[:10] if len(a) > 1)
-                except (ValueError, TypeError, IndexError):
-                    bid_vol = 0.0
-                    ask_vol = 0.0
-                obi = order_book_imbalance(bid_vol, ask_vol)
-
-                if direction == SignalDirection.LONG and obi > self.obi_threshold:
-                    obi_agrees = True
-                    weighted_confidence += 0.05
-                elif direction == SignalDirection.SHORT and obi < -self.obi_threshold:
-                    obi_agrees = True
-                    weighted_confidence += 0.05
-
-        # "Sure Fire" detection: 3+ strategies + OBI agreement
+        # "Sure Fire" detection: threshold strategies + OBI agreement
         is_sure_fire = (
             confluence_count >= self.confluence_threshold and
             obi_agrees and
@@ -380,6 +423,8 @@ class ConfluenceDetector:
 
     def _get_strategy_weight(self, strategy_name: str) -> float:
         """Get the weight for a strategy, considering performance adjustment."""
+        if strategy_name == "order_book":
+            return self.obi_weight
         for strategy in self.strategies:
             if strategy.name == strategy_name:
                 # Performance-adjusted weight

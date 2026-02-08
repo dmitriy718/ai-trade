@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import yaml
 from dotenv import load_dotenv
@@ -42,6 +42,8 @@ class TradingConfig(BaseModel):
     warmup_timeframe: str = "1m"
     max_concurrent_positions: int = 5
     cooldown_seconds: int = 300
+    # Single Strategy Mode: if set, only this strategy runs (e.g. "keltner", "trend")
+    single_strategy_mode: Optional[Union[str, bool]] = None
 
 
 class StrategyWeights(BaseModel):
@@ -106,6 +108,9 @@ class AIConfig(BaseModel):
     tflite_model_path: str = "models/trade_predictor.tflite"
     order_book_depth: int = 25
     obi_threshold: float = 0.15
+    # Weighted Order Book: when True, OBI counts as heavy (OBI + 1 strategy = tradable). When False, OBI is not a confluence vote.
+    obi_counts_as_confluence: bool = False
+    obi_weight: float = 0.4  # weight of synthetic OBI signal when weighted (e.g. 0.4 or 0.7)
     whale_threshold_usd: float = 50000.0
 
 
@@ -171,6 +176,57 @@ class AppConfig(BaseModel):
     log_level: str = "INFO"
 
 
+# Control plane: Web + optional Telegram / Discord / Slack
+class ControlWebConfig(BaseModel):
+    enabled: bool = True
+
+
+class ControlTelegramConfig(BaseModel):
+    enabled: bool = False
+    token: str = ""
+    chat_ids: List[str] = Field(default_factory=list)  # allowlist of chat IDs
+
+
+class ControlDiscordConfig(BaseModel):
+    enabled: bool = False
+    token: str = ""
+    allowed_channel_ids: List[str] = Field(default_factory=list)
+    allowed_guild_id: Optional[str] = None
+
+
+class ControlSlackConfig(BaseModel):
+    enabled: bool = False
+    token: str = ""  # bot token (xoxb-...)
+    signing_secret: str = ""
+    app_token: Optional[str] = None  # for Socket Mode (xapp-...)
+    allowed_channel_id: Optional[str] = None
+
+
+class ControlConfig(BaseModel):
+    web: ControlWebConfig = Field(default_factory=ControlWebConfig)
+    telegram: ControlTelegramConfig = Field(default_factory=ControlTelegramConfig)
+    discord: ControlDiscordConfig = Field(default_factory=ControlDiscordConfig)
+    slack: ControlSlackConfig = Field(default_factory=ControlSlackConfig)
+
+
+# Billing (Stripe) and multi-tenant
+class StripeConfig(BaseModel):
+    enabled: bool = False
+    secret_key: str = ""  # sk_live_... or sk_test_...
+    webhook_secret: str = ""  # whsec_... for signature verification
+    price_id: str = ""  # Stripe Price ID for monthly subscription (price_...)
+    currency: str = "usd"
+
+
+class TenantConfig(BaseModel):
+    default_tenant_id: str = "default"  # used when no tenant in request (single-tenant mode)
+
+
+class BillingConfig(BaseModel):
+    stripe: StripeConfig = Field(default_factory=StripeConfig)
+    tenant: TenantConfig = Field(default_factory=TenantConfig)
+
+
 class BotConfig(BaseModel):
     """Master configuration model with full validation."""
     app: AppConfig = Field(default_factory=AppConfig)
@@ -180,6 +236,8 @@ class BotConfig(BaseModel):
     ai: AIConfig = Field(default_factory=AIConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
+    control: ControlConfig = Field(default_factory=ControlConfig)
+    billing: BillingConfig = Field(default_factory=BillingConfig)
     ml: MLConfig = Field(default_factory=MLConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
 

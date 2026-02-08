@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from src.core.logger import get_logger
 
@@ -49,20 +49,28 @@ class TelegramBot:
         self,
         token: str = "",
         chat_id: str = "",
+        chat_ids: Optional[list] = None,
         rate_limit_seconds: int = 2,
     ):
         self.token = token or os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
+        _single = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
+        self.chat_ids = chat_ids if chat_ids is not None else ([_single] if _single else [])
+        self.chat_id = self.chat_ids[0] if self.chat_ids else ""  # for send_message
         self.rate_limit_seconds = rate_limit_seconds
         self._bot = None
         self._app = None
         self._last_message_time: float = 0
-        self._bot_engine = None  # L19: Removed unused _message_queue
-        self._enabled = bool(self.token and self.chat_id)
+        self._bot_engine = None
+        self._control_router = None
+        self._enabled = bool(self.token and self.chat_ids)
 
     def set_bot_engine(self, engine) -> None:
         """Inject the bot engine reference for command execution."""
         self._bot_engine = engine
+
+    def set_control_router(self, router) -> None:
+        """Inject the control router for pause/resume/close_all/kill."""
+        self._control_router = router
 
     async def initialize(self) -> bool:
         """Initialize the Telegram bot."""
@@ -185,10 +193,10 @@ class TelegramBot:
     # ------------------------------------------------------------------
 
     def _is_authorized(self, update) -> bool:
-        """C5 FIX: Verify chat_id matches configured authorized user."""
-        if not self.chat_id:
+        """C5 FIX: Verify chat_id is in allowlist (chat_ids or legacy chat_id)."""
+        if not self.chat_ids:
             return False
-        return str(update.message.chat_id) == str(self.chat_id)
+        return str(update.message.chat_id) in [str(c) for c in self.chat_ids]
 
     async def _cmd_status(self, update, context) -> None:
         """Handle /status command."""
@@ -273,7 +281,10 @@ class TelegramBot:
         """Handle /pause command."""
         if not self._is_authorized(update):
             return
-        if self._bot_engine:
+        if self._control_router:
+            await self._control_router.pause()
+            await update.message.reply_text("⏸ Trading *PAUSED*", parse_mode="Markdown")
+        elif self._bot_engine:
             self._bot_engine._trading_paused = True
             await update.message.reply_text("⏸ Trading *PAUSED*", parse_mode="Markdown")
 
@@ -281,7 +292,10 @@ class TelegramBot:
         """Handle /resume command."""
         if not self._is_authorized(update):
             return
-        if self._bot_engine:
+        if self._control_router:
+            await self._control_router.resume()
+            await update.message.reply_text("▶️ Trading *RESUMED*", parse_mode="Markdown")
+        elif self._bot_engine:
             self._bot_engine._trading_paused = False
             await update.message.reply_text("▶️ Trading *RESUMED*", parse_mode="Markdown")
 
@@ -289,7 +303,13 @@ class TelegramBot:
         """Handle /close_all command."""
         if not self._is_authorized(update):
             return
-        if self._bot_engine:
+        if self._control_router:
+            result = await self._control_router.close_all("telegram")
+            count = result.get("closed", 0)
+            await update.message.reply_text(
+                f"⚠️ Closed *{count}* positions", parse_mode="Markdown"
+            )
+        elif self._bot_engine:
             count = await self._bot_engine.executor.close_all_positions("telegram")
             await update.message.reply_text(
                 f"⚠️ Closed *{count}* positions", parse_mode="Markdown"
@@ -299,7 +319,14 @@ class TelegramBot:
         """Handle /kill command - emergency shutdown."""
         if not self._is_authorized(update):
             return
-        if self._bot_engine:
+        if self._control_router:
+            await update.message.reply_text(
+                "🔴 *EMERGENCY SHUTDOWN INITIATED*\n"
+                "Closing all positions and stopping...",
+                parse_mode="Markdown"
+            )
+            await self._control_router.kill()
+        elif self._bot_engine:
             await update.message.reply_text(
                 "🔴 *EMERGENCY SHUTDOWN INITIATED*\n"
                 "Closing all positions and stopping...",

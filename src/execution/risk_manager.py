@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -49,6 +49,15 @@ class StopLossState:
     trailing_activated: bool = False
     trailing_high: float = 0.0    # Highest price since trailing activation
     trailing_low: float = float("inf")  # H6 FIX: inf default so shorts work
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize state to dict."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> StopLossState:
+        """Deserialize state from dict."""
+        return cls(**data)
 
 
 class RiskManager:
@@ -112,6 +121,7 @@ class RiskManager:
         self._max_drawdown: float = 0.0
         self._trade_history: List[Dict[str, float]] = []
         self._daily_reset_date: str = ""
+        self._global_cooldown_until: float = 0.0
 
     # ------------------------------------------------------------------
     # Position Sizing (Kelly Criterion)
@@ -245,6 +255,13 @@ class RiskManager:
 
     def _pre_trade_checks(self, pair: str, result: PositionSizeResult) -> bool:
         """Run pre-trade risk checks."""
+        # Global cooldown check
+        now = time.time()
+        if now < self._global_cooldown_until:
+            remaining = self._global_cooldown_until - now
+            result.reason = f"Global cooldown: {remaining:.0f}s remaining"
+            return False
+
         # C3 FIX: Check only negative PnL, not absolute value
         self._check_daily_reset()
         if self._daily_pnl <= -(self.current_bankroll * self.max_daily_loss):
@@ -284,13 +301,15 @@ class RiskManager:
         entry_price: float,
         stop_loss: float,
         side: str,
+        trailing_high: float = 0.0,
+        trailing_low: float = float("inf"),
     ) -> StopLossState:
         """Initialize stop loss tracking for a new position."""
         state = StopLossState(
             initial_sl=stop_loss,
             current_sl=stop_loss,
-            trailing_high=entry_price if side == "buy" else 0,
-            trailing_low=entry_price if side == "sell" else float("inf"),
+            trailing_high=trailing_high if trailing_high > 0 else (entry_price if side == "buy" else 0),
+            trailing_low=trailing_low if trailing_low != float("inf") else (entry_price if side == "sell" else float("inf")),
         )
         self._stop_states[trade_id] = state
         return state
@@ -472,6 +491,11 @@ class RiskManager:
         self._daily_pnl += pnl
         self.current_bankroll += pnl
         self._trade_history.append({"pnl": pnl, "time": time.time()})
+
+        # Global cooldown: 30 mins after a loss to prevent churn
+        if pnl < 0:
+            self._global_cooldown_until = time.time() + 1800 # 30 mins
+            logger.warning("Loss detected, global cooldown activated", pnl=pnl)
 
         # Update peak and drawdown
         if self.current_bankroll > self._peak_bankroll:

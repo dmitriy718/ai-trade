@@ -34,6 +34,7 @@ trading:
   warmup_timeframe: "1m"
   max_concurrent_positions: 10
   cooldown_seconds: 300
+  single_strategy_mode: false   # or "keltner", "trend", "mean_reversion", etc. for testing
 
 strategies:
   # Keltner Channel — primary strategy for high win rate
@@ -86,20 +87,50 @@ ai:
   tflite_model_path: "models/trade_predictor.tflite"
   order_book_depth: 25
   obi_threshold: 0.15  # Order Book Imbalance threshold
+  obi_counts_as_confluence: false  # "Weighted Order Book": when true, OBI + 1 strategy = tradable
+  obi_weight: 0.4
   whale_threshold_usd: 50000
 
 risk:
-  max_risk_per_trade: 0.02  # 2% of bankroll
+  max_risk_per_trade: 0.005  # 0.5% of bankroll (was 2%)
   max_daily_loss: 0.05      # 5% max daily drawdown
-  max_position_usd: 500.0
+  max_position_usd: 200.0   # (was 500)
   atr_multiplier_sl: 2.0
   atr_multiplier_tp: 3.0
-  trailing_activation_pct: 0.008  # 0.8% profit to activate trailing
+  trailing_activation_pct: 0.012  # 1.2% profit to activate trailing (was 0.8)
   trailing_step_pct: 0.005        # 0.5% trailing step
-  breakeven_activation_pct: 0.01  # 1% profit to move SL to breakeven
+  breakeven_activation_pct: 0.008 # 0.8% profit to move SL to breakeven (was 1%)
   kelly_fraction: 0.25            # Quarter-Kelly for safety
   max_kelly_size: 0.10            # Never more than 10% of bankroll
   risk_of_ruin_threshold: 0.01    # 1% acceptable risk of ruin
+
+control:
+  web:
+    enabled: true
+  telegram:
+    enabled: false
+    token: ""   # or set TELEGRAM_BOT_TOKEN
+    chat_ids: []  # allowlist of Telegram chat IDs
+  discord:
+    enabled: false
+    token: ""
+    allowed_channel_ids: []
+    allowed_guild_id: null
+  slack:
+    enabled: false
+    token: ""
+    signing_secret: ""
+    allowed_channel_id: null
+
+billing:
+  stripe:
+    enabled: false
+    secret_key: ""       # sk_test_... or sk_live_... (or STRIPE_SECRET_KEY env)
+    webhook_secret: ""   # whsec_... (or STRIPE_WEBHOOK_SECRET env)
+    price_id: ""         # Stripe Price ID for monthly plan (price_...)
+    currency: usd
+  tenant:
+    default_tenant_id: default
 
 dashboard:
   host: "0.0.0.0"

@@ -9,6 +9,7 @@ both paper and live trading modes.
 # ENHANCEMENT: Added slippage estimation model
 # ENHANCEMENT: Added order retry with price adjustment
 # ENHANCEMENT: Added unified fill processor for DB <-> RAM sync
+# ENHANCEMENT: Support for Limit Orders to control execution price
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from src.core.database import DatabaseManager
 from src.core.logger import get_logger
 from src.exchange.kraken_rest import KrakenRESTClient
 from src.exchange.market_data import MarketDataCache
-from src.execution.risk_manager import RiskManager
+from src.execution.risk_manager import RiskManager, StopLossState
 from src.strategies.base import SignalDirection
 
 logger = get_logger("executor")
@@ -81,14 +82,24 @@ class TradeExecutor:
             entry_price = trade["entry_price"]
             sl = trade["stop_loss"]
             
-            # Use metadata to get size_usd if available
+            # Use metadata to get size_usd and trailing state if available
             size_usd = 0.0
+            trailing_high = 0.0
+            trailing_low = float("inf")
+            
             if trade.get("metadata"):
                 try:
                     meta = json.loads(trade["metadata"]) if isinstance(trade["metadata"], str) else trade["metadata"]
                     size_usd = meta.get("size_usd", 0.0)
+                    
+                    # Restore stop loss state
+                    if "stop_loss_state" in meta:
+                        sl_state = meta["stop_loss_state"]
+                        trailing_high = sl_state.get("trailing_high", 0.0)
+                        trailing_low = sl_state.get("trailing_low", float("inf"))
                 except Exception:
                     pass
+            
             if size_usd == 0.0:
                 size_usd = entry_price * trade["quantity"]
 
@@ -99,10 +110,8 @@ class TradeExecutor:
             # Restore stop loss state
             if sl > 0:
                 self.risk_manager.initialize_stop_loss(
-                    trade_id, entry_price, sl, side
+                    trade_id, entry_price, sl, side, trailing_high, trailing_low
                 )
-            # If trailing stop was already active, it will naturally continue 
-            # as update_stop_loss moves it based on trailing_high/low.
             
             logger.info(
                 "Restored position state",
@@ -119,16 +128,15 @@ class TradeExecutor:
         1. Validate signal quality
         2. Check risk constraints
         3. Calculate position size
-        4. Place order
+        4. Place order (Limit)
         5. Record trade
         
         Returns trade_id if executed, None if rejected.
         
         # ENHANCEMENT: Added multi-stage validation
+        # ENHANCEMENT: Transitioned to Limit Orders for better price control
         """
         # Stage 1: Signal validation
-        # (Confluence and confidence gates are handled by the engine scan loop.
-        #  Executor just validates direction and duplicate pair.)
         if signal.direction == SignalDirection.NEUTRAL:
             return None
 
@@ -144,19 +152,15 @@ class TradeExecutor:
         side = "buy" if signal.direction == SignalDirection.LONG else "sell"
 
         # Estimate win rate from historical data
-        # ENHANCEMENT: Use optimistic defaults when no history exists
-        # to allow paper mode to generate initial training data
         stats = await self.db.get_performance_stats()
         total_trades = stats.get("total_trades", 0)
 
         if total_trades >= 50:
-            # Enough history for real stats to influence Kelly cap
             win_rate = max(stats.get("win_rate", 0.5), 0.35)
             avg_win = max(stats.get("avg_win", 1.0), 0.01)
             avg_loss = max(abs(stats.get("avg_loss", -1.0)), 0.01)
             win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 1.5
         else:
-            # Bootstrap: fixed fractional sizing only (Kelly won't cap)
             win_rate = 0.50
             win_loss_ratio = 1.5
 
@@ -179,17 +183,36 @@ class TradeExecutor:
             )
             return None
 
+        # Determine Limit Price
+        # We want to fill immediately but not slip.
+        # Buy at Ask, Sell at Bid.
+        ticker = self.market_data.get_ticker(signal.pair)
+        limit_price = signal.entry_price # Default
+        
+        if ticker:
+            try:
+                if side == "buy":
+                    # ticker['a'][0] is best ask price
+                    limit_price = float(ticker['a'][0])
+                else:
+                    # ticker['b'][0] is best bid price
+                    limit_price = float(ticker['b'][0])
+            except (KeyError, IndexError, ValueError):
+                pass
+
         # Stage 3: Place order
         trade_id = f"T-{uuid.uuid4().hex[:12]}"
 
         if self.mode == "paper":
             fill_price = await self._paper_fill(
-                signal.pair, side, signal.entry_price
+                signal.pair, side, limit_price
             )
         else:
+            # Use Limit Order
             fill_price = await self._live_fill(
-                signal.pair, side, "market",
-                size_result.size_units, trade_id
+                signal.pair, side, "limit",
+                size_result.size_units, trade_id,
+                price=limit_price
             )
 
         if fill_price is None:
@@ -202,7 +225,7 @@ class TradeExecutor:
 
         # Stage 4: Record trade
         slippage = abs(fill_price - signal.entry_price) / signal.entry_price
-        fee_rate = 0.0026  # Kraken taker fee
+        fee_rate = 0.0026  # Kraken taker fee (assuming immediate fill)
         fees = size_result.size_usd * fee_rate
 
         trade_record = {
@@ -227,6 +250,7 @@ class TradeExecutor:
                 "slippage": slippage,
                 "fees": fees,
                 "mode": self.mode,
+                "order_type": "limit"
             }
         }
 
@@ -252,7 +276,7 @@ class TradeExecutor:
         await self.db.log_thought(
             "trade",
             f"{'📈' if side == 'buy' else '📉'} {side.upper()} {signal.pair} @ "
-            f"${fill_price:.2f} | Size: ${size_result.size_usd:.2f} | "
+            f"${fill_price:.2f} (Limit) | Size: ${size_result.size_usd:.2f} | "
             f"SL: ${signal.stop_loss:.2f} | TP: ${signal.take_profit:.2f} | "
             f"Confluence: {signal.confluence_count} | "
             f"{'SURE FIRE' if signal.is_sure_fire else 'Standard'}",
@@ -335,11 +359,24 @@ class TradeExecutor:
                 return
 
         # Update stop loss in DB if changed
-        if state.current_sl > 0 and state.current_sl != trade.get("stop_loss", 0):
-            await self.db.update_trade(trade_id, {
-                "stop_loss": state.current_sl,
-                "trailing_stop": state.current_sl if state.trailing_activated else None,
-            })
+        if state.current_sl > 0:
+            # Prepare metadata update with stop loss state
+            meta = {}
+            if trade.get("metadata"):
+                try:
+                    meta = json.loads(trade["metadata"]) if isinstance(trade["metadata"], str) else trade["metadata"]
+                except Exception:
+                    pass
+            
+            meta["stop_loss_state"] = state.to_dict()
+            
+            # Only update if SL changed or we just need to persist state
+            if state.current_sl != trade.get("stop_loss", 0) or "stop_loss_state" not in meta:
+                await self.db.update_trade(trade_id, {
+                    "stop_loss": state.current_sl,
+                    "trailing_stop": state.current_sl if state.trailing_activated else None,
+                    "metadata": meta
+                })
 
     async def _close_position(
         self,
@@ -372,6 +409,8 @@ class TradeExecutor:
             close_side = "sell" if side == "buy" else "buy"
             for attempt in range(3):
                 try:
+                    # Use Limit Order for closing if possible, but Market is safer for stops
+                    # For now, sticking to Market for stops/TP to ensure exit
                     await self.rest_client.place_order(
                         pair=pair,
                         side=close_side,
@@ -441,9 +480,16 @@ class TradeExecutor:
         Applies realistic slippage based on spread and volatility.
         
         # ENHANCEMENT: Added volume-aware slippage model
+        # ENHANCEMENT: Limit order simulation
         """
         spread = self.market_data.get_spread(pair)
-        slippage_pct = max(spread / 2, 0.0001)  # At least half the spread
+        
+        # For limit orders (target_price is explicit), we fill at that price
+        # assuming the market has crossed it.
+        # Since we use current Ask/Bid as limit, it should fill immediately.
+        # We add a tiny "spread slippage" to mimic crossing the book spread if data is stale.
+        
+        slippage_pct = max(spread / 10, 0.00005)
 
         if side == "buy":
             fill_price = target_price * (1 + slippage_pct)
@@ -459,11 +505,13 @@ class TradeExecutor:
         order_type: str,
         volume: float,
         client_order_id: str,
+        price: Optional[float] = None
     ) -> Optional[float]:
         """
         Execute a live order on Kraken.
         
         # ENHANCEMENT: Added order monitoring with timeout
+        # ENHANCEMENT: Support for Limit orders
         """
         try:
             result = await self.rest_client.place_order(
@@ -471,6 +519,7 @@ class TradeExecutor:
                 side=side,
                 order_type=order_type,
                 volume=volume,
+                price=price,
                 client_order_id=client_order_id,
                 validate_only=(self.mode != "live"),
             )
