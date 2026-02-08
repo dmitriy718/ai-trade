@@ -14,6 +14,7 @@ both paper and live trading modes.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from datetime import datetime, timezone
@@ -69,6 +70,44 @@ class TradeExecutor:
             "total_slippage": 0.0,
             "total_fees": 0.0,
         }
+
+    async def reinitialize_positions(self) -> None:
+        """Restore position and stop-loss state from database after restart."""
+        open_trades = await self.db.get_open_trades()
+        for trade in open_trades:
+            trade_id = trade["trade_id"]
+            pair = trade["pair"]
+            side = trade["side"]
+            entry_price = trade["entry_price"]
+            sl = trade["stop_loss"]
+            
+            # Use metadata to get size_usd if available
+            size_usd = 0.0
+            if trade.get("metadata"):
+                try:
+                    meta = json.loads(trade["metadata"]) if isinstance(trade["metadata"], str) else trade["metadata"]
+                    size_usd = meta.get("size_usd", 0.0)
+                except Exception:
+                    pass
+            if size_usd == 0.0:
+                size_usd = entry_price * trade["quantity"]
+
+            # Re-register with RiskManager
+            self.risk_manager.register_position(
+                trade_id, pair, side, entry_price, size_usd
+            )
+            # Restore stop loss state
+            if sl > 0:
+                self.risk_manager.initialize_stop_loss(
+                    trade_id, entry_price, sl, side
+                )
+            # If trailing stop was already active, it will naturally continue 
+            # as update_stop_loss moves it based on trailing_high/low.
+            
+            logger.info(
+                "Restored position state",
+                trade_id=trade_id, pair=pair, sl=sl
+            )
 
     async def execute_signal(
         self, signal: ConfluenceSignal
@@ -296,7 +335,7 @@ class TradeExecutor:
                 return
 
         # Update stop loss in DB if changed
-        if state.current_sl != trade.get("stop_loss", 0):
+        if state.current_sl > 0 and state.current_sl != trade.get("stop_loss", 0):
             await self.db.update_trade(trade_id, {
                 "stop_loss": state.current_sl,
                 "trailing_stop": state.current_sl if state.trailing_activated else None,

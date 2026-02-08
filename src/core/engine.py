@@ -168,6 +168,9 @@ class BotEngine:
             mode=self.mode,
         )
 
+        # Restore open positions state
+        await self.executor.reinitialize_positions()
+
         # Dashboard
         self.dashboard = DashboardServer()
         self.dashboard.set_bot_engine(self)

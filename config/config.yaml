@@ -32,7 +32,7 @@ trading:
   hft_scan_interval_seconds: 1
   warmup_bars: 720     # 12 hours of 1-min data for indicator convergence
   warmup_timeframe: "1m"
-  max_concurrent_positions: 5
+  max_concurrent_positions: 10
   cooldown_seconds: 300
 
 strategies:
@@ -94,7 +94,7 @@ risk:
   max_position_usd: 500.0
   atr_multiplier_sl: 2.0
   atr_multiplier_tp: 3.0
-  trailing_activation_pct: 0.015  # 1.5% profit to activate trailing
+  trailing_activation_pct: 0.008  # 0.8% profit to activate trailing
   trailing_step_pct: 0.005        # 0.5% trailing step
   breakeven_activation_pct: 0.01  # 1% profit to move SL to breakeven
   kelly_fraction: 0.25            # Quarter-Kelly for safety
