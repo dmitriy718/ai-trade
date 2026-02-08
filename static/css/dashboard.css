@@ -644,9 +644,54 @@ body {
     transition: height 0.3s ease;
 }
 
+/* ---- Settings ---- */
+.settings-card {
+    grid-column: 1 / 2;
+    grid-row: 4 / 5;
+}
+
+.settings-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.settings-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.settings-item.checkbox-item {
+    cursor: pointer;
+}
+
+.settings-item.checkbox-item input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--cyan);
+    cursor: pointer;
+}
+
+.settings-item.checkbox-item span {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    letter-spacing: 0.5px;
+}
+
+.settings-hint {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    margin: 0;
+    line-height: 1.4;
+}
+
 /* ---- Risk Monitor ---- */
 .risk-card {
-    grid-column: 3 / 4;
+    grid-column: 2 / 4;
+    grid-row: 4 / 5;
 }
 
 .risk-grid {
@@ -709,7 +754,8 @@ body {
     .positions-card { grid-column: 1 / 3; }
     .strategy-card { grid-column: 1 / 2; }
     .scanner-card { grid-column: 1 / 3; }
-    .risk-card { grid-column: 2 / 3; }
+    .settings-card { grid-column: 1 / 2; grid-row: auto; }
+    .risk-card { grid-column: 2 / 3; grid-row: auto; }
 }
 
 @media (max-width: 768px) {
@@ -717,8 +763,9 @@ body {
         grid-template-columns: 1fr;
     }
     .pnl-card, .thought-card, .positions-card,
-    .strategy-card, .scanner-card, .risk-card {
+    .strategy-card, .scanner-card, .settings-card, .risk-card {
         grid-column: 1 / -1;
+        grid-row: auto;
     }
     .hud-header {
         flex-wrap: wrap;

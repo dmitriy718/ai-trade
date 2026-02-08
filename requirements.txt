@@ -7,12 +7,12 @@ httpx==0.28.1
 aiohttp==3.11.11
 
 # Data & Analysis
-pandas==2.2.3
-numpy==1.26.4
+pandas>=2.2.0,<3
+numpy>=1.26.0,<2
 ta==0.11.0
 
-# Machine Learning
-tensorflow==2.16.2
+# Machine Learning (use flexible version for Raspberry Pi / ARM; 2.16.x on x86, 2.20.x on Pi)
+tensorflow>=2.16.2,<2.21
 scikit-learn==1.6.0
 
 # Database
@@ -36,6 +36,9 @@ asyncio-throttle==1.0.2
 
 # Telegram Bot (optional)
 python-telegram-bot==21.9
+
+# Billing (Stripe)
+stripe>=8.0.0,<10
 
 # Testing
 pytest==8.3.4

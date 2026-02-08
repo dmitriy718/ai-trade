@@ -87,12 +87,19 @@ async def run_bot():
         severity="info",
     )
 
+    async def _run_with_logging(coro, name):
+        try:
+            await coro
+        except Exception as e:
+            logger.error(f"Background task {name} failed", error=str(e), traceback=traceback.format_exc())
+
     # Phase 4: Start background tasks
     engine._tasks = [
-        asyncio.create_task(engine._main_scan_loop()),
-        asyncio.create_task(engine._ws_data_loop()),
-        asyncio.create_task(engine._health_monitor()),
-        asyncio.create_task(engine._cleanup_loop()),
+        asyncio.create_task(_run_with_logging(engine._main_scan_loop(), "scan_loop")),
+        asyncio.create_task(_run_with_logging(engine._ws_data_loop(), "ws_loop")),
+        asyncio.create_task(_run_with_logging(engine._health_monitor(), "health_monitor")),
+        asyncio.create_task(_run_with_logging(engine._cleanup_loop(), "cleanup_loop")),
+        asyncio.create_task(_run_with_logging(engine.retrainer.run(), "auto_retrainer")),
     ]
     server_task = asyncio.create_task(server.serve())
 

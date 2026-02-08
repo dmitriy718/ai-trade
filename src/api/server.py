@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -66,12 +66,17 @@ class DashboardServer:
         self._setup_routes()
         self._ws_connections: Set[WebSocket] = set()
         self._bot_engine = None
+        self._control_router = None
         self._ws_cache: Optional[Dict[str, Any]] = None
         self._ws_cache_time: float = 0
 
     def set_bot_engine(self, engine) -> None:
         """Inject the bot engine reference."""
         self._bot_engine = engine
+
+    def set_control_router(self, router) -> None:
+        """Inject the control router for pause/resume/close_all."""
+        self._control_router = router
 
     def _setup_middleware(self) -> None:
         """Configure CORS and security middleware."""
@@ -100,9 +105,21 @@ class DashboardServer:
         if static_path.exists():
             self.app.mount("/static", StaticFiles(directory="static"), name="static")
 
+        @self.app.get("/favicon.ico", include_in_schema=False)
+        async def favicon():
+            from fastapi import Response
+            return Response(status_code=204)
+
         # ---- Status Endpoints ----
 
+        @self.app.get("/api/v1/health")
+        @self.app.head("/api/v1/health")
+        async def health():
+            """Probing endpoint for dashboard connectivity."""
+            return {"status": "ok"}
+
         @self.app.get("/api/v1/status")
+        @self.app.head("/api/v1/status")
         async def get_status():
             """Get overall system status."""
             if not self._bot_engine:
@@ -222,11 +239,39 @@ class DashboardServer:
                 return {}
             return self._bot_engine.executor.get_execution_stats()
 
+        # ---- Settings (AI / confluence options) ----
+        @self.app.get("/api/v1/settings")
+        async def get_settings():
+            """Get settings used by the dashboard (e.g. Weighted Order Book)."""
+            if not self._bot_engine:
+                return {"weighted_order_book": False}
+            c = getattr(self._bot_engine, "confluence", None)
+            return {
+                "weighted_order_book": getattr(c, "obi_counts_as_confluence", False),
+            }
+
+        @self.app.patch("/api/v1/settings", dependencies=[Depends(_require_auth)])
+        async def patch_settings(body: dict = Body(...)):
+            """Update settings at runtime (e.g. Weighted Order Book). Takes effect immediately; for persistence set config.yaml and restart."""
+            if not self._bot_engine:
+                raise HTTPException(status_code=503, detail="Bot not running")
+            c = getattr(self._bot_engine, "confluence", None)
+            if not c:
+                raise HTTPException(status_code=503, detail="Confluence not available")
+            if "weighted_order_book" in body:
+                c.obi_counts_as_confluence = bool(body["weighted_order_book"])
+            return {"weighted_order_book": c.obi_counts_as_confluence}
+
         # ---- Control Endpoints ----
 
         @self.app.post("/api/v1/control/close_all", dependencies=[Depends(_require_auth)])
         async def close_all_positions():
             """Emergency close all positions. Requires X-API-Key header."""
+            if self._control_router:
+                result = await self._control_router.close_all("api_close_all")
+                if not result.get("ok"):
+                    raise HTTPException(status_code=503, detail=result.get("error", "Bot not running"))
+                return {"closed": result.get("closed", 0)}
             if not self._bot_engine:
                 raise HTTPException(status_code=503, detail="Bot not running")
             count = await self._bot_engine.executor.close_all_positions("api_close_all")
@@ -235,6 +280,9 @@ class DashboardServer:
         @self.app.post("/api/v1/control/pause", dependencies=[Depends(_require_auth)])
         async def pause_trading():
             """Pause trading. Requires X-API-Key header."""
+            if self._control_router:
+                result = await self._control_router.pause()
+                return {"status": "paused"}
             if self._bot_engine:
                 self._bot_engine._trading_paused = True
                 await self._bot_engine.db.log_thought(
@@ -245,6 +293,9 @@ class DashboardServer:
         @self.app.post("/api/v1/control/resume", dependencies=[Depends(_require_auth)])
         async def resume_trading():
             """Resume trading. Requires X-API-Key header."""
+            if self._control_router:
+                await self._control_router.resume()
+                return {"status": "resumed"}
             if self._bot_engine:
                 self._bot_engine._trading_paused = False
                 await self._bot_engine.db.log_thought(

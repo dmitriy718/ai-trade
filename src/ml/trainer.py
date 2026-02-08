@@ -8,11 +8,13 @@ converts to TFLite format, and deploys the model for live inference.
 # ENHANCEMENT: Added cross-validation for robustness
 # ENHANCEMENT: Added feature importance analysis
 # ENHANCEMENT: Added training metrics logging
+# ENHANCEMENT: Isolate training in separate process to avoid blocking event loop
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import shutil
@@ -29,21 +31,118 @@ from src.core.logger import get_logger
 logger = get_logger("ml_trainer")
 
 
+def _run_training_process(
+    X: np.ndarray,
+    y: np.ndarray,
+    model_dir: Path,
+    epochs: int,
+    batch_size: int,
+    validation_split: float
+) -> Dict[str, Any]:
+    """
+    Standalone function to run training in a separate process.
+    Must be top-level for pickle compatibility.
+    """
+    import tensorflow as tf
+    
+    # Configure GPU memory growth if available (in the worker process)
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            print(e)
+
+    # Split data
+    n_val = int(len(X) * validation_split)
+    indices = np.random.permutation(len(X))
+    X_train = X[indices[n_val:]]
+    y_train = y[indices[n_val:]]
+    X_val = X[indices[:n_val]]
+    y_val = y[indices[:n_val]]
+
+    # Build model
+    model = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(X.shape[1],)),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.Dropout(0.3),
+        tf.keras.layers.Dense(32, activation='relu'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(16, activation='relu'),
+        tf.keras.layers.Dense(1, activation='sigmoid'),
+    ])
+
+    # Compile with class weights
+    pos_weight = len(y_train) / (2 * max(np.sum(y_train), 1))
+    neg_weight = len(y_train) / (2 * max(np.sum(1 - y_train), 1))
+    class_weights = {0: neg_weight, 1: pos_weight}
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        loss='binary_crossentropy',
+        metrics=['accuracy', tf.keras.metrics.AUC(name='auc')],
+    )
+
+    # Callbacks
+    early_stop = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        patience=10,
+        restore_best_weights=True,
+    )
+
+    lr_schedule = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=5,
+        min_lr=1e-6,
+    )
+
+    # Train
+    history = model.fit(
+        X_train, y_train,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_data=(X_val, y_val),
+        class_weight=class_weights,
+        callbacks=[early_stop, lr_schedule],
+        verbose=0,
+    )
+
+    # Evaluate
+    val_loss, val_accuracy, val_auc = model.evaluate(
+        X_val, y_val, verbose=0
+    )
+
+    # Save Keras model
+    keras_path = str(model_dir / "trade_predictor.keras")
+    model.save(keras_path)
+
+    # Convert to TFLite
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    tflite_model = converter.convert()
+
+    tflite_path = model_dir / "trade_predictor_new.tflite"
+    tflite_path.write_bytes(tflite_model)
+
+    return {
+        "val_loss": float(val_loss),
+        "val_accuracy": float(val_accuracy),
+        "val_auc": float(val_auc),
+        "epochs_trained": len(history.history['loss']),
+        "train_samples": len(X_train),
+        "val_samples": len(X_val),
+        "features": X.shape[1],
+        "model_size_kb": len(tflite_model) / 1024,
+    }
+
+
 class ModelTrainer:
     """
     Auto-retraining pipeline for the trade prediction model.
-    
-    Pipeline:
-    1. Extract labeled features from database
-    2. Preprocess and split data
-    3. Train neural network
-    4. Validate on holdout set
-    5. Convert to TFLite format
-    6. Deploy if performance meets threshold
-    
-    # ENHANCEMENT: Added A/B model comparison before deployment
-    # ENHANCEMENT: Added training history tracking
-    # ENHANCEMENT: Added early stopping with patience
     """
 
     def __init__(
@@ -65,6 +164,7 @@ class ModelTrainer:
         self.validation_split = validation_split
         self.min_accuracy = min_accuracy
         self._training_history: List[Dict[str, Any]] = []
+        self._executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
 
     async def train(self) -> Dict[str, Any]:
         """
@@ -102,9 +202,20 @@ class ModelTrainer:
             positive_ratio=float(np.mean(y)),
         )
 
-        # Step 3: Train model
+        # Step 3: Train model (in separate process)
         try:
-            metrics = await self._train_model(X, y)
+            loop = asyncio.get_running_loop()
+            metrics = await loop.run_in_executor(
+                self._executor,
+                _run_training_process,
+                X,
+                y,
+                self.model_dir,
+                self.epochs,
+                self.batch_size,
+                self.validation_split
+            )
+            
             result["metrics"] = metrics
 
             # Step 4: Check if model meets threshold
@@ -202,109 +313,6 @@ class ModelTrainer:
         except Exception as e:
             logger.error("Data preparation failed", error=str(e))
             return None, None
-
-    async def _train_model(
-        self, X: np.ndarray, y: np.ndarray
-    ) -> Dict[str, Any]:
-        """
-        Train the neural network model.
-        
-        Architecture: Input -> Dense(64, ReLU) -> Dropout(0.3) ->
-                      Dense(32, ReLU) -> Dropout(0.2) ->
-                      Dense(16, ReLU) -> Dense(1, Sigmoid)
-        
-        # ENHANCEMENT: Added learning rate scheduling
-        # ENHANCEMENT: Added early stopping
-        """
-        import tensorflow as tf
-
-        # Split data
-        n_val = int(len(X) * self.validation_split)
-        indices = np.random.permutation(len(X))
-        X_train = X[indices[n_val:]]
-        y_train = y[indices[n_val:]]
-        X_val = X[indices[:n_val]]
-        y_val = y[indices[:n_val]]
-
-        # Build model
-        model = tf.keras.Sequential([
-            tf.keras.layers.Input(shape=(X.shape[1],)),
-            tf.keras.layers.Dense(64, activation='relu'),
-            tf.keras.layers.BatchNormalization(),
-            tf.keras.layers.Dropout(0.3),
-            tf.keras.layers.Dense(32, activation='relu'),
-            tf.keras.layers.BatchNormalization(),
-            tf.keras.layers.Dropout(0.2),
-            tf.keras.layers.Dense(16, activation='relu'),
-            tf.keras.layers.Dense(1, activation='sigmoid'),
-        ])
-
-        # Compile with class weights
-        pos_weight = len(y_train) / (2 * max(np.sum(y_train), 1))
-        neg_weight = len(y_train) / (2 * max(np.sum(1 - y_train), 1))
-        class_weights = {0: neg_weight, 1: pos_weight}
-
-        model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-            loss='binary_crossentropy',
-            metrics=['accuracy', tf.keras.metrics.AUC(name='auc')],
-        )
-
-        # Callbacks
-        early_stop = tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=10,
-            restore_best_weights=True,
-        )
-
-        lr_schedule = tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=5,
-            min_lr=1e-6,
-        )
-
-        # Train
-        history = model.fit(
-            X_train, y_train,
-            epochs=self.epochs,
-            batch_size=self.batch_size,
-            validation_data=(X_val, y_val),
-            class_weight=class_weights,
-            callbacks=[early_stop, lr_schedule],
-            verbose=0,
-        )
-
-        # Evaluate
-        val_loss, val_accuracy, val_auc = model.evaluate(
-            X_val, y_val, verbose=0
-        )
-
-        # Save Keras model
-        keras_path = str(self.model_dir / "trade_predictor.keras")
-        model.save(keras_path)
-
-        # Convert to TFLite
-        converter = tf.lite.TFLiteConverter.from_keras_model(model)
-        converter.optimizations = [tf.lite.Optimize.DEFAULT]
-        tflite_model = converter.convert()
-
-        tflite_path = self.model_dir / "trade_predictor_new.tflite"
-        tflite_path.write_bytes(tflite_model)
-
-        metrics = {
-            "val_loss": float(val_loss),
-            "val_accuracy": float(val_accuracy),
-            "val_auc": float(val_auc),
-            "epochs_trained": len(history.history['loss']),
-            "train_samples": len(X_train),
-            "val_samples": len(X_val),
-            "features": X.shape[1],
-            "model_size_kb": len(tflite_model) / 1024,
-        }
-
-        logger.info("Model training complete", **metrics)
-        return metrics
 
     async def _deploy_model(self) -> bool:
         """

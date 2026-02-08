@@ -31,6 +31,7 @@ from src.exchange.kraken_ws import KrakenWebSocketClient
 from src.exchange.market_data import MarketDataCache
 from src.execution.executor import TradeExecutor
 from src.execution.risk_manager import RiskManager
+from src.ml.trainer import ModelTrainer, AutoRetrainer
 from src.strategies.base import SignalDirection
 
 logger = get_logger("engine")
@@ -124,9 +125,16 @@ class BotEngine:
             confluence_threshold=self.config.ai.confluence_threshold,
             obi_threshold=self.config.ai.obi_threshold,
             min_confidence=self.config.ai.min_confidence,
+            obi_counts_as_confluence=getattr(
+                self.config.ai, "obi_counts_as_confluence", False
+            ),
+            obi_weight=getattr(self.config.ai, "obi_weight", 0.4),
         )
         self.confluence.configure_strategies(
-            self.config.strategies.model_dump()
+            self.config.strategies.model_dump(),
+            single_strategy_mode=getattr(
+                self.config.trading, "single_strategy_mode", None
+            ),
         )
 
         self.predictor = TFLitePredictor(
@@ -166,6 +174,18 @@ class BotEngine:
             risk_manager=self.risk_manager,
             db=self.db,
             mode=self.mode,
+        )
+
+        # AI Training Components
+        self.ml_trainer = ModelTrainer(
+            db=self.db,
+            min_samples=self.config.ml.min_samples,
+            epochs=self.config.ml.epochs,
+            batch_size=self.config.ml.batch_size,
+        )
+        self.retrainer = AutoRetrainer(
+            trainer=self.ml_trainer,
+            interval_hours=self.config.ml.retrain_interval_hours,
         )
 
         # Restore open positions state

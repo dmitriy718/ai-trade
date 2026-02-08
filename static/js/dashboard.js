@@ -30,7 +30,7 @@ function connectWebSocket() {
         // Silently probe with a HEAD request first (no console error on fail)
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), 3000);
-        fetch('/api/v1/status', { signal: ctrl.signal, method: 'HEAD' })
+        fetch('/api/v1/health', { signal: ctrl.signal, method: 'HEAD' })
             .then(r => { clearTimeout(t); if (r.ok) { serverReachable = true; doConnect(wsUrl); } else { scheduleReconnect(); } })
             .catch(() => { clearTimeout(t); scheduleReconnect(); });
         return;
@@ -46,6 +46,7 @@ function doConnect(wsUrl) {
         wsAttempts = 0;
         serverReachable = true;
         updateStatus('ONLINE', false);
+        loadSettings();
     };
 
     ws.onmessage = (event) => {
@@ -292,19 +293,50 @@ function generateSparkline(data) {
     return data.map(v => `<div class="spark-bar" style="height:${Math.max(2, ((v - min) / range) * 18)}px"></div>`).join('');
 }
 
+// ---- Settings ----
+
+const API_KEY = 'change_this_to_a_random_string';
+
+async function loadSettings() {
+    if (!serverReachable) return;
+    try {
+        const r = await fetch('/api/v1/settings');
+        const d = await r.json();
+        const cb = document.getElementById('weightedOrderBook');
+        if (cb && typeof d.weighted_order_book === 'boolean') cb.checked = d.weighted_order_book;
+    } catch {}
+}
+
+async function saveWeightedOrderBook(checked) {
+    if (!serverReachable) return;
+    try {
+        await fetch('/api/v1/settings', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+            body: JSON.stringify({ weighted_order_book: checked })
+        });
+    } catch {}
+}
+
+function setupSettings() {
+    const cb = document.getElementById('weightedOrderBook');
+    if (!cb) return;
+    cb.addEventListener('change', () => saveWeightedOrderBook(cb.checked));
+}
+
 // ---- Controls ----
 
 async function togglePause() {
     if (!serverReachable) return;
     const ep = isPaused ? '/api/v1/control/resume' : '/api/v1/control/pause';
-    try { await fetch(ep, { method: 'POST', headers: { 'X-API-Key': 'change_this_to_a_random_string' } }); } catch {}
+    try { await fetch(ep, { method: 'POST', headers: { 'X-API-Key': API_KEY } }); } catch {}
 }
 
 async function closeAll() {
     if (!serverReachable) return;
     if (!confirm('EMERGENCY: Close ALL open positions?')) return;
     try {
-        const r = await fetch('/api/v1/control/close_all', { method: 'POST', headers: { 'X-API-Key': 'change_this_to_a_random_string' } });
+        const r = await fetch('/api/v1/control/close_all', { method: 'POST', headers: { 'X-API-Key': API_KEY } });
         const d = await r.json();
         alert(`Closed ${d.closed} positions`);
     } catch {}
@@ -363,6 +395,10 @@ function escHtml(t) { const d = document.createElement('div'); d.textContent = t
 document.addEventListener('DOMContentLoaded', () => {
     connectWebSocket();
     setupThoughtScroll();
+    setupSettings();
+    // Load settings when server is reachable (after first WS connect)
+    setInterval(loadSettings, 15000);
+    loadSettings();
     // Only fetch strategies when server is reachable (gated inside the function)
     setInterval(fetchStrategyStats, 5000);
     // NO fallback polling — WebSocket is the sole data channel.
