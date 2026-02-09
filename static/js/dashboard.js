@@ -15,6 +15,8 @@ let userScrolledThoughts = false;
 let scrollResetTimer = null;
 let serverReachable = false;   // gate: no fetches until true
 let reconnectTimer = null;
+const strategyElements = new Map();
+let algoTooltip = null;
 
 // ---- WebSocket (sole data channel when healthy) ----
 
@@ -344,17 +346,108 @@ async function closeAll() {
 
 // ---- Strategy Stats (only when server is reachable) ----
 
+function strategyDisplayName(name) {
+    if (!name) return 'UNKNOWN';
+    return String(name).replace(/_/g, ' ').toUpperCase();
+}
+
+function ensureStrategyRow(name) {
+    const grid = document.getElementById('strategyGrid');
+    if (!grid) return null;
+    if (strategyElements.has(name)) return strategyElements.get(name);
+
+    if (strategyElements.size === 0) grid.innerHTML = '';
+
+    const item = document.createElement('div');
+    item.className = 'strategy-item';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'strategy-name';
+    nameEl.textContent = strategyDisplayName(name);
+
+    const barWrap = document.createElement('div');
+    barWrap.className = 'strategy-bar';
+    const bar = document.createElement('div');
+    bar.className = 'bar-fill';
+    bar.style.width = '0%';
+    barWrap.appendChild(bar);
+
+    const stat = document.createElement('span');
+    stat.className = 'strategy-stat';
+    stat.textContent = '--';
+
+    item.appendChild(nameEl);
+    item.appendChild(barWrap);
+    item.appendChild(stat);
+    grid.appendChild(item);
+
+    const entry = { bar, stat, nameEl, item };
+    strategyElements.set(name, entry);
+    return entry;
+}
+
+function initAlgoTooltip() {
+    algoTooltip = document.getElementById('algoTooltip');
+    const grid = document.getElementById('strategyGrid');
+    if (!algoTooltip || !grid) return;
+
+    grid.addEventListener('mousemove', (e) => {
+        if (!algoTooltip || algoTooltip.classList.contains('hidden')) return;
+        const offset = 12;
+        const x = Math.min(window.innerWidth - 20, e.clientX + offset);
+        const y = Math.min(window.innerHeight - 20, e.clientY + offset);
+        algoTooltip.style.left = `${x}px`;
+        algoTooltip.style.top = `${y}px`;
+    });
+
+    grid.addEventListener('mouseover', (e) => {
+        const item = e.target.closest('.strategy-item');
+        if (!item || !algoTooltip) return;
+        const note = item.dataset.note;
+        if (!note) {
+            algoTooltip.classList.add('hidden');
+            return;
+        }
+        algoTooltip.textContent = note;
+        algoTooltip.classList.remove('hidden');
+    });
+
+    grid.addEventListener('mouseout', (e) => {
+        const item = e.target.closest('.strategy-item');
+        if (item && algoTooltip) algoTooltip.classList.add('hidden');
+    });
+}
+
 async function fetchStrategyStats() {
     if (!serverReachable) return;
     try {
         const strategies = await (await fetch('/api/v1/strategies')).json();
-        const barMap = { trend:'trendBar', mean_reversion:'meanrevBar', momentum:'momentumBar', breakout:'breakoutBar', reversal:'reversalBar' };
-        const statMap = { trend:'trendStat', mean_reversion:'meanrevStat', momentum:'momentumStat', breakout:'breakoutStat', reversal:'reversalStat' };
+        if (!Array.isArray(strategies)) return;
         for (const s of strategies) {
-            const bar = document.getElementById(barMap[s.name]);
-            const stat = document.getElementById(statMap[s.name]);
-            if (bar) bar.style.width = ((s.win_rate || 0) * 100) + '%';
-            if (stat) stat.textContent = s.trades > 0 ? `${(s.win_rate*100).toFixed(0)}% (${s.trades})` : '--';
+            if (!s || !s.name) continue;
+            const row = ensureStrategyRow(s.name);
+            if (!row) continue;
+
+            const winRate = Number(s.win_rate);
+            const trades = Number(s.trades);
+            const enabled = s.enabled !== false;
+            const kind = s.kind || 'strategy';
+            const isStrategy = kind === 'strategy';
+            if (s.note) row.item.dataset.note = s.note;
+            else delete row.item.dataset.note;
+
+            if (isStrategy) {
+                if (Number.isFinite(winRate) && trades > 0) {
+                    row.bar.style.width = (Math.max(0, Math.min(winRate, 1)) * 100) + '%';
+                    row.stat.textContent = `${(winRate * 100).toFixed(0)}% (${trades})`;
+                } else {
+                    row.bar.style.width = '0%';
+                    row.stat.textContent = '--';
+                }
+            } else {
+                row.bar.style.width = enabled ? '100%' : '0%';
+                row.stat.textContent = enabled ? 'ON' : 'OFF';
+            }
         }
     } catch {}
 }
@@ -396,6 +489,7 @@ document.addEventListener('DOMContentLoaded', () => {
     connectWebSocket();
     setupThoughtScroll();
     setupSettings();
+    initAlgoTooltip();
     // Load settings when server is reachable (after first WS connect)
     setInterval(loadSettings, 15000);
     loadSettings();

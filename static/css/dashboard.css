@@ -546,7 +546,7 @@ body {
     font-size: 10px;
     letter-spacing: 1px;
     color: var(--text-secondary);
-    min-width: 75px;
+    min-width: 140px;
 }
 
 .strategy-bar {
@@ -571,6 +571,30 @@ body {
     color: var(--text-dim);
     min-width: 40px;
     text-align: right;
+}
+
+.algo-tooltip {
+    position: fixed;
+    z-index: 9999;
+    max-width: 260px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(12, 18, 28, 0.95);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.3px;
+    border: 1px solid rgba(0, 255, 255, 0.2);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.algo-tooltip.hidden {
+    opacity: 0;
+    transform: translateY(4px);
 }
 
 /* ---- Scanner Grid ---- */

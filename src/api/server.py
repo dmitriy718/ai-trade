@@ -254,7 +254,7 @@ class DashboardServer:
             """Get strategy performance stats."""
             if not self._bot_engine:
                 return []
-            return self._bot_engine.confluence.get_strategy_stats()
+            return self._bot_engine.get_algorithm_stats()
 
         @self.app.get("/api/v1/risk")
         async def get_risk():

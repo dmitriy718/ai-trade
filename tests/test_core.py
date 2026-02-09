@@ -28,7 +28,9 @@ from src.strategies.breakout import BreakoutStrategy
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.momentum import MomentumStrategy
 from src.strategies.reversal import ReversalStrategy
+from src.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
 from src.strategies.trend import TrendStrategy
+from src.strategies.vwap_momentum_alpha import VWAPMomentumAlphaStrategy
 from src.ai.predictor import TradePredictorFeatures
 from src.ml.trainer import ModelTrainer
 from src.utils.indicators import (
@@ -199,6 +201,20 @@ class TestStrategies:
         strategy = ReversalStrategy()
         closes, highs, lows, volumes = self._generate_ranging()
         signal = await strategy.analyze("BTC/USD", closes, highs, lows, volumes)
+        assert isinstance(signal, StrategySignal)
+
+    @pytest.mark.asyncio
+    async def test_vwap_momentum_alpha_returns_signal(self):
+        strategy = VWAPMomentumAlphaStrategy()
+        closes, highs, lows, volumes = self._generate_uptrend()
+        signal = await strategy.analyze("BTC/USD", closes, highs, lows, volumes)
+        assert isinstance(signal, StrategySignal)
+
+    @pytest.mark.asyncio
+    async def test_rsi_mean_reversion_returns_signal(self):
+        strategy = RSIMeanReversionStrategy()
+        closes, highs, lows, volumes = self._generate_ranging()
+        signal = await strategy.analyze("ETH/USD", closes, highs, lows, volumes)
         assert isinstance(signal, StrategySignal)
 
     @pytest.mark.asyncio
