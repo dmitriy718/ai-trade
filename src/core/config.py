@@ -81,6 +81,31 @@ class MomentumConfig(StrategyWeights):
     volume_multiplier: float = 1.5
 
 
+class VWAPMomentumAlphaConfig(StrategyWeights):
+    vwap_window: int = 20
+    band_std: float = 1.5
+    pullback_z: float = 0.6
+    slope_period: int = 5
+    volume_multiplier: float = 1.0
+    pullback_z_trend_adjust: float = -0.12
+    pullback_z_range_adjust: float = 0.12
+    pullback_z_high_vol_adjust: float = 0.10
+    pullback_z_low_vol_adjust: float = -0.05
+    slope_min_pct: float = 0.0005
+    weight: float = 0.12
+
+
+class RSIMeanReversionConfig(StrategyWeights):
+    rsi_period: int = 14
+    rsi_oversold: int = 30
+    rsi_overbought: int = 70
+    trend_adjust: int = 5
+    range_adjust: int = 5
+    high_vol_adjust: int = 3
+    low_vol_adjust: int = 2
+    weight: float = 0.12
+
+
 class BreakoutConfig(StrategyWeights):
     lookback_period: int = 20
     volume_confirmation: float = 1.3
@@ -110,6 +135,8 @@ class StrategiesConfig(BaseModel):
     trend: TrendConfig = Field(default_factory=TrendConfig)
     mean_reversion: MeanReversionConfig = Field(default_factory=MeanReversionConfig)
     momentum: MomentumConfig = Field(default_factory=MomentumConfig)
+    vwap_momentum_alpha: VWAPMomentumAlphaConfig = Field(default_factory=VWAPMomentumAlphaConfig)
+    rsi_mean_reversion: RSIMeanReversionConfig = Field(default_factory=RSIMeanReversionConfig)
     breakout: BreakoutConfig = Field(default_factory=BreakoutConfig)
     reversal: ReversalConfig = Field(default_factory=ReversalConfig)
 
@@ -122,30 +149,38 @@ class RegimeConfig(BaseModel):
     trend_weight_multipliers: Dict[str, float] = Field(default_factory=lambda: {
         "trend": 1.3,
         "momentum": 1.2,
+        "vwap_momentum_alpha": 1.2,
         "breakout": 1.1,
         "mean_reversion": 0.8,
+        "rsi_mean_reversion": 0.8,
         "reversal": 0.7,
         "keltner": 0.9,
     })
     range_weight_multipliers: Dict[str, float] = Field(default_factory=lambda: {
         "mean_reversion": 1.3,
+        "rsi_mean_reversion": 1.3,
         "keltner": 1.2,
         "reversal": 1.1,
         "trend": 0.8,
         "momentum": 0.8,
+        "vwap_momentum_alpha": 0.8,
         "breakout": 0.8,
     })
     high_vol_weight_multipliers: Dict[str, float] = Field(default_factory=lambda: {
         "breakout": 1.2,
         "momentum": 1.1,
+        "vwap_momentum_alpha": 1.1,
         "mean_reversion": 0.9,
+        "rsi_mean_reversion": 0.9,
         "reversal": 0.9,
     })
     low_vol_weight_multipliers: Dict[str, float] = Field(default_factory=lambda: {
         "mean_reversion": 1.2,
+        "rsi_mean_reversion": 1.2,
         "keltner": 1.1,
         "breakout": 0.9,
         "momentum": 0.9,
+        "vwap_momentum_alpha": 0.9,
     })
 
 

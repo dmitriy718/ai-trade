@@ -1,7 +1,7 @@
 """
 Multi-Strategy Confluence Detector - "Sure Fire" Setup Engine.
 
-Orchestrates all 5 strategies in parallel, then scores confluence
+Orchestrates all strategies in parallel, then scores confluence
 when multiple strategies agree on direction. Applies Order Book
 Imbalance as a final confirmation filter.
 
@@ -27,7 +27,9 @@ from src.strategies.keltner import KeltnerStrategy
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.momentum import MomentumStrategy
 from src.strategies.reversal import ReversalStrategy
+from src.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
 from src.strategies.trend import TrendStrategy
+from src.strategies.vwap_momentum_alpha import VWAPMomentumAlphaStrategy
 from src.utils.indicator_cache import IndicatorCache
 from src.utils.indicators import order_book_imbalance
 
@@ -108,7 +110,7 @@ class ConfluenceDetector:
     """
     Multi-algorithm confluence engine.
     
-    Runs all 5 strategies in parallel, then analyzes agreement patterns.
+    Runs all strategies in parallel, then analyzes agreement patterns.
     A "Sure Fire" setup is detected when 3+ strategies align AND the
     Order Book Imbalance confirms the direction.
     
@@ -157,6 +159,8 @@ class ConfluenceDetector:
             TrendStrategy(weight=0.20),
             MeanReversionStrategy(weight=0.15),
             MomentumStrategy(weight=0.15),
+            VWAPMomentumAlphaStrategy(weight=0.12),
+            RSIMeanReversionStrategy(weight=0.12),
             BreakoutStrategy(weight=0.10),
             ReversalStrategy(weight=0.10),
         ]
@@ -169,30 +173,38 @@ class ConfluenceDetector:
         self._default_trend_weights = {
             "trend": 1.3,
             "momentum": 1.2,
+            "vwap_momentum_alpha": 1.2,
             "breakout": 1.1,
             "mean_reversion": 0.8,
+            "rsi_mean_reversion": 0.8,
             "reversal": 0.7,
             "keltner": 0.9,
         }
         self._default_range_weights = {
             "mean_reversion": 1.3,
+            "rsi_mean_reversion": 1.3,
             "keltner": 1.2,
             "reversal": 1.1,
             "trend": 0.8,
             "momentum": 0.8,
+            "vwap_momentum_alpha": 0.8,
             "breakout": 0.8,
         }
         self._default_high_vol_weights = {
             "breakout": 1.2,
             "momentum": 1.1,
+            "vwap_momentum_alpha": 1.1,
             "mean_reversion": 0.9,
+            "rsi_mean_reversion": 0.9,
             "reversal": 0.9,
         }
         self._default_low_vol_weights = {
             "mean_reversion": 1.2,
+            "rsi_mean_reversion": 1.2,
             "keltner": 1.1,
             "breakout": 0.9,
             "momentum": 0.9,
+            "vwap_momentum_alpha": 0.9,
         }
 
     def configure_strategies(
@@ -204,6 +216,8 @@ class ConfluenceDetector:
             "trend": TrendStrategy,
             "mean_reversion": MeanReversionStrategy,
             "momentum": MomentumStrategy,
+            "vwap_momentum_alpha": VWAPMomentumAlphaStrategy,
+            "rsi_mean_reversion": RSIMeanReversionStrategy,
             "breakout": BreakoutStrategy,
             "reversal": ReversalStrategy,
         }
@@ -284,7 +298,9 @@ class ConfluenceDetector:
             indicator_cache = IndicatorCache(closes, highs, lows, volumes)
             trend_regime, vol_regime = self._detect_regime(indicator_cache, closes)
             signals = await self._run_strategies(
-                pair, closes, highs, lows, volumes, opens, indicator_cache
+                pair, closes, highs, lows, volumes, opens, indicator_cache,
+                trend_regime=trend_regime,
+                vol_regime=vol_regime,
             )
             timeframe_results[tf] = self._compute_confluence(
                 pair, signals, trend_regime, vol_regime
@@ -301,6 +317,8 @@ class ConfluenceDetector:
         volumes: np.ndarray,
         opens: np.ndarray,
         indicator_cache: IndicatorCache,
+        trend_regime: Optional[str] = None,
+        vol_regime: Optional[str] = None,
     ) -> List[StrategySignal]:
         """Run all strategies for a given timeframe with timeout + cooldown filtering."""
         signals: List[StrategySignal] = []
@@ -313,6 +331,8 @@ class ConfluenceDetector:
                         pair, closes, highs, lows, volumes,
                         opens=opens,
                         indicator_cache=indicator_cache,
+                        trend_regime=trend_regime,
+                        vol_regime=vol_regime,
                         round_trip_fee_pct=self.round_trip_fee_pct,
                     ),
                     timeout=5.0,
@@ -685,8 +705,8 @@ class ConfluenceDetector:
         """Return True if the dominant strategy set matches the trend regime."""
         if not trend_regime:
             return False
-        trend_set = {"trend", "momentum", "breakout"}
-        range_set = {"mean_reversion", "reversal", "keltner"}
+        trend_set = {"trend", "momentum", "breakout", "vwap_momentum_alpha"}
+        range_set = {"mean_reversion", "rsi_mean_reversion", "reversal", "keltner"}
         strategy_names = {s.strategy_name for s in signals}
         if trend_regime == "trend":
             return len(strategy_names & trend_set) > 0
@@ -808,7 +828,12 @@ class ConfluenceDetector:
 
     def get_strategy_stats(self) -> List[Dict[str, Any]]:
         """Get performance stats for all strategies."""
-        return [s.get_stats() for s in self.strategies]
+        stats = []
+        for s in self.strategies:
+            item = s.get_stats()
+            item["kind"] = "strategy"
+            stats.append(item)
+        return stats
 
     def record_trade_result(self, strategy_name: str, pnl: float) -> None:
         """Record a trade result for adaptive strategy weighting."""

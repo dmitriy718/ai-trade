@@ -392,7 +392,8 @@ class BotEngine:
                     await self.db.log_thought(
                         "analysis",
                         f"🔍 {signal.pair} | {signal.direction.value.upper()} | "
-                        f"Confluence: {signal.confluence_count}/6 | "
+                        f"Confluence: {signal.confluence_count}/"
+                        f"{len(self.confluence.strategies) + (1 if self.confluence.obi_counts_as_confluence else 0)} | "
                         f"Strength: {signal.strength:.2f} | "
                         f"AI Conf: {ai_confidence:.2f} | "
                         f"OBI: {signal.obi:+.3f} | "
@@ -722,3 +723,57 @@ class BotEngine:
             spread=self.market_data.get_spread(signal.pair),
         )
         return features
+
+    def get_algorithm_stats(self) -> List[Dict[str, Any]]:
+        """Return full algorithm transparency list for the dashboard."""
+        stats: List[Dict[str, Any]] = []
+        if self.confluence:
+            stats.extend(self.confluence.get_strategy_stats())
+            obi_enabled = getattr(self.confluence, "obi_threshold", 0) > 0
+            book_enabled = getattr(self.confluence, "book_score_threshold", 0) > 0
+            stats.append({
+                "name": "order_book_imbalance",
+                "enabled": bool(obi_enabled),
+                "weight": float(getattr(self.confluence, "obi_weight", 0.0)),
+                "trades": 0,
+                "win_rate": None,
+                "total_pnl": None,
+                "avg_pnl": None,
+                "kind": "filter",
+                "note": "confirmation filter"
+                        + (" (weighted)" if getattr(self.confluence, "obi_counts_as_confluence", False) else ""),
+            })
+            stats.append({
+                "name": "order_book_microstructure",
+                "enabled": bool(book_enabled),
+                "weight": 0.0,
+                "trades": 0,
+                "win_rate": None,
+                "total_pnl": None,
+                "avg_pnl": None,
+                "kind": "filter",
+                "note": "book score confirmation",
+            })
+            stats.append({
+                "name": "regime_detector",
+                "enabled": True,
+                "weight": 0.0,
+                "trades": 0,
+                "win_rate": None,
+                "total_pnl": None,
+                "avg_pnl": None,
+                "kind": "model",
+                "note": "trend/volatility regime",
+            })
+        stats.append({
+            "name": "ai_predictor",
+            "enabled": bool(self.predictor and self.predictor.is_model_loaded),
+            "weight": 0.0,
+            "trades": 0,
+            "win_rate": None,
+            "total_pnl": None,
+            "avg_pnl": None,
+            "kind": "model",
+            "note": "tflite signal scoring",
+        })
+        return stats

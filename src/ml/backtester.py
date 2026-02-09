@@ -28,10 +28,13 @@ from src.exchange.market_data import MarketDataCache
 from src.execution.risk_manager import RiskManager
 from src.strategies.base import BaseStrategy, SignalDirection, StrategySignal
 from src.strategies.breakout import BreakoutStrategy
+from src.strategies.keltner import KeltnerStrategy
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.momentum import MomentumStrategy
 from src.strategies.reversal import ReversalStrategy
+from src.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
 from src.strategies.trend import TrendStrategy
+from src.strategies.vwap_momentum_alpha import VWAPMomentumAlphaStrategy
 from src.utils.indicators import atr
 
 logger = get_logger("backtester")
@@ -184,7 +187,7 @@ class Backtester:
         Args:
             pair: Trading pair
             ohlcv_data: DataFrame with columns [time, open, high, low, close, volume]
-            strategies: List of strategies to test (default: all 5)
+            strategies: List of strategies to test (default: all built-in strategies)
             confluence_threshold: Min strategies for trade entry
             mode: "simple" (default) or "parity" (live-like)
             config: Optional BotConfig for parity mode
@@ -202,9 +205,12 @@ class Backtester:
             )
         if strategies is None:
             strategies = [
+                KeltnerStrategy(),
                 TrendStrategy(),
                 MeanReversionStrategy(),
+                RSIMeanReversionStrategy(),
                 MomentumStrategy(),
+                VWAPMomentumAlphaStrategy(),
                 BreakoutStrategy(),
                 ReversalStrategy(),
             ]
