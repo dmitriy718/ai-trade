@@ -1,0 +1,84 @@
+# ============================================
+# AI Trading Bot - Docker Compose
+# Production deployment configuration
+# ============================================
+
+version: "3.8"
+
+services:
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-trading-bot
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"
+    volumes:
+      - bot-data:/app/data
+      - bot-logs:/app/logs
+      - bot-models:/app/models
+      - ./config:/app/config:ro
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    networks:
+      - trading-net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+        reservations:
+          memory: 512M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Optional: Monitoring with Prometheus metrics
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: trading-prometheus
+  #   volumes:
+  #     - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - prometheus-data:/prometheus
+  #   ports:
+  #     - "9090:9090"
+  #   networks:
+  #     - trading-net
+
+  # Optional: Grafana dashboard
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   container_name: trading-grafana
+  #   volumes:
+  #     - grafana-data:/var/lib/grafana
+  #   ports:
+  #     - "3000:3000"
+  #   networks:
+  #     - trading-net
+
+volumes:
+  bot-data:
+    driver: local
+  bot-logs:
+    driver: local
+  bot-models:
+    driver: local
+  # prometheus-data:
+  # grafana-data:
+
+networks:
+  trading-net:
+    driver: bridge

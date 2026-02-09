@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+.venv*/
+env/
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+
+# Secrets
+.env
+.env.*
+!.env.example
+config/.vault.enc
+config/.vault.bak
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Data (auto-generated)
+data/
+logs/
+models/*.tflite
+models/*.keras
+models/*.h5
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/

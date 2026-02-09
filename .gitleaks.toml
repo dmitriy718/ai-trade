@@ -1,0 +1,10 @@
+[allowlist]
+paths = [
+  "^\.venv.*",
+  "^venv/",
+  "^env/",
+  "^__pycache__/",
+  "^data/",
+  "^logs/",
+  "^models/"
+]

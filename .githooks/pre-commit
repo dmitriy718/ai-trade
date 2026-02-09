@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Block committing secrets or virtual envs
+
+# 1) Block forbidden paths
+forbidden_paths_regex='(^|/)(\.env($|\.)|env/|venv/|\.venv[^/]*?/|__pycache__/|data/|logs/|models/)'\
+'|\.pem$|\.key$|\.p12$|\.pfx$|config/\.vault\.(enc|bak)$'
+
+staged_files=$(git diff --cached --name-only)
+if [[ -n "${staged_files}" ]]; then
+  if echo "${staged_files}" | rg -n "${forbidden_paths_regex}" > /dev/null; then
+    echo "[pre-commit] Blocked: forbidden paths or sensitive files staged."
+    echo "Remove them from staging and try again."
+    exit 1
+  fi
+fi
+
+# 2) Block likely secrets in staged content
+secret_patterns=(
+  'KRAKEN_API_KEY\s*=\s*[^\s#]'
+  'KRAKEN_API_SECRET\s*=\s*[^\s#]'
+  'DASHBOARD_SECRET_KEY\s*=\s*[^\s#]'
+  'VAULT_PASSWORD\s*=\s*[^\s#]'
+  'STRIPE_SECRET_KEY\s*=\s*[^\s#]'
+  'STRIPE_WEBHOOK_SECRET\s*=\s*[^\s#]'
+  'STRIPE_PRICE_ID\s*=\s*[^\s#]'
+  'sk_live_[0-9a-zA-Z]+'
+  'rk_live_[0-9a-zA-Z]+'
+  'xox[baprs]-[0-9a-zA-Z-]+'
+)
+
+# Extract staged diff and scan
+staged_diff=$(git diff --cached -U0 --no-color || true)
+if [[ -n "${staged_diff}" ]]; then
+  for pat in "${secret_patterns[@]}"; do
+    if echo "${staged_diff}" | rg -n "$pat" > /dev/null; then
+      echo "[pre-commit] Blocked: potential secret detected in staged changes."
+      echo "Pattern: $pat"
+      exit 1
+    fi
+  done
+fi
+
+# 3) Block large files ( > 25MB )
+max_bytes=$((25 * 1024 * 1024))
+for f in ${staged_files}; do
+  if [[ -f "$f" ]]; then
+    size=$(wc -c < "$f" | tr -d ' ')
+    if [[ "$size" -gt "$max_bytes" ]]; then
+      echo "[pre-commit] Blocked: $f is larger than 25MB (${size} bytes)."
+      exit 1
+    fi
+  fi
+done
+
+exit 0
