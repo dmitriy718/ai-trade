@@ -1,0 +1,223 @@
+# ============================================
+# AI Trading Bot - Master Configuration
+# ============================================
+
+app:
+  name: "AI Crypto Trading Bot"
+  version: "2.0.0"
+  mode: "paper"  # paper | live
+  log_level: "INFO"
+  db_path: "data/trading.db"
+
+exchange:
+  name: "kraken"
+  ws_url: "wss://ws.kraken.com/v2"
+  ws_auth_url: "wss://ws-auth.kraken.com/v2"
+  rest_url: "https://api.kraken.com"
+  rate_limit_per_second: 15
+  max_retries: 5
+  retry_base_delay: 1.0
+  timeout: 30
+  maker_fee: 0.0016
+  taker_fee: 0.0026
+  post_only: false
+  limit_chase_attempts: 2
+  limit_chase_delay_seconds: 2.0
+  limit_fallback_to_market: true
+
+trading:
+  pairs:
+    - "BTC/USD"
+    - "ETH/USD"
+    - "SOL/USD"
+    - "XRP/USD"
+    - "ADA/USD"
+    - "DOT/USD"
+    - "AVAX/USD"
+    - "LINK/USD"
+  scan_interval_seconds: 30   # More frequent scans = more chances to catch setups
+  position_check_interval_seconds: 2
+  hft_scan_interval_seconds: 1
+  warmup_bars: 720     # 12 hours of 1-min data for indicator convergence
+  warmup_timeframe: "1m"
+  timeframes: [1, 5, 15]
+  max_concurrent_positions: 10
+  cooldown_seconds: 300
+  max_spread_pct: 0.002
+  use_closed_candles_only: false
+  strategy_cooldowns_seconds:
+    keltner: 300
+    trend: 300
+    mean_reversion: 300
+    momentum: 300
+    breakout: 300
+    reversal: 300
+  event_price_move_pct: 0.005
+  single_strategy_mode: false   # or "keltner", "trend", "mean_reversion", etc. for testing
+
+strategies:
+  # Keltner Channel — primary strategy for high win rate
+  keltner:
+    enabled: true
+    ema_period: 20
+    atr_period: 14
+    kc_multiplier: 1.5
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    rsi_period: 14
+    rsi_long_max: 45   # Slightly relaxed so more long setups qualify
+    rsi_short_min: 55  # Slightly relaxed so more short setups qualify
+    weight: 0.30
+  # Tuned for 1-MINUTE candles — longer periods to filter noise
+  trend:
+    enabled: true
+    ema_fast: 20        # ~20 min fast EMA (was 5)
+    ema_slow: 50        # ~50 min slow EMA (was 13)
+    adx_threshold: 30   # Stricter trend filter (was 25)
+    weight: 0.25
+  mean_reversion:
+    enabled: true
+    bb_period: 50       # 50-min Bollinger (was 20)
+    bb_std: 2.5         # Wider bands = fewer false signals
+    rsi_oversold: 25    # More extreme = higher conviction (was 30)
+    rsi_overbought: 75  # (was 70)
+    weight: 0.20
+  momentum:
+    enabled: true
+    rsi_threshold: 55   # Slight bias to confirm direction (was 50)
+    volume_multiplier: 2.0  # Stronger volume burst needed (was 1.5)
+    weight: 0.20
+  breakout:
+    enabled: true
+    lookback_period: 60  # 1-hour S/R levels (was 20)
+    volume_confirmation: 1.8  # (was 1.3)
+    weight: 0.20
+  reversal:
+    enabled: true
+    rsi_extreme_low: 15   # Very extreme only (was 20)
+    rsi_extreme_high: 85  # (was 80)
+    confirmation_candles: 5  # More confirmation bars (was 3)
+    weight: 0.15
+
+ai:
+  confluence_threshold: 2  # Min strategies that must agree
+  min_confidence: 0.55
+  tflite_model_path: "models/trade_predictor.tflite"
+  order_book_depth: 25
+  obi_threshold: 0.15  # Order Book Imbalance threshold
+  book_score_threshold: 0.2
+  book_score_max_age_seconds: 5
+  multi_timeframe_min_agreement: 2
+  primary_timeframe: 1
+  obi_counts_as_confluence: false  # "Weighted Order Book": when true, OBI + 1 strategy = tradable
+  obi_weight: 0.4
+  whale_threshold_usd: 50000
+  regime:
+    adx_trend_threshold: 25
+    atr_pct_high: 0.02
+    atr_pct_low: 0.008
+    trend_weight_multipliers:
+      trend: 1.3
+      momentum: 1.2
+      breakout: 1.1
+      mean_reversion: 0.8
+      reversal: 0.7
+      keltner: 0.9
+    range_weight_multipliers:
+      mean_reversion: 1.3
+      keltner: 1.2
+      reversal: 1.1
+      trend: 0.8
+      momentum: 0.8
+      breakout: 0.8
+    high_vol_weight_multipliers:
+      breakout: 1.2
+      momentum: 1.1
+      mean_reversion: 0.9
+      reversal: 0.9
+    low_vol_weight_multipliers:
+      mean_reversion: 1.2
+      keltner: 1.1
+      breakout: 0.9
+      momentum: 0.9
+
+risk:
+  max_risk_per_trade: 0.005  # 0.5% of bankroll (was 2%)
+  max_daily_loss: 0.05      # 5% max daily drawdown
+  max_position_usd: 200.0   # (was 500)
+  initial_bankroll: 10000.0
+  atr_multiplier_sl: 2.0
+  atr_multiplier_tp: 3.0
+  trailing_activation_pct: 0.012  # 1.2% profit to activate trailing (was 0.8)
+  trailing_step_pct: 0.005        # 0.5% trailing step
+  breakeven_activation_pct: 0.008 # 0.8% profit to move SL to breakeven (was 1%)
+  kelly_fraction: 0.25            # Quarter-Kelly for safety
+  max_kelly_size: 0.10            # Never more than 10% of bankroll
+  risk_of_ruin_threshold: 0.01    # 1% acceptable risk of ruin
+  global_cooldown_seconds_on_loss: 1800
+
+control:
+  web:
+    enabled: true
+  telegram:
+    enabled: false
+    token: ""   # or set TELEGRAM_BOT_TOKEN
+    chat_ids: []  # allowlist of Telegram chat IDs
+  discord:
+    enabled: false
+    token: ""
+    allowed_channel_ids: []
+    allowed_guild_id: null
+  slack:
+    enabled: false
+    token: ""
+    signing_secret: ""
+    allowed_channel_id: null
+
+billing:
+  stripe:
+    enabled: false
+    secret_key: ""       # sk_test_... or sk_live_... (or STRIPE_SECRET_KEY env)
+    webhook_secret: ""   # whsec_... (or STRIPE_WEBHOOK_SECRET env)
+    price_id: ""         # Stripe Price ID for monthly plan (price_...)
+    currency: usd
+  tenant:
+    default_tenant_id: default
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8080
+  thought_feed_max: 200
+  refresh_interval_ms: 1000
+
+ml:
+  retrain_interval_hours: 168  # Weekly
+  min_samples: 10000
+  epochs: 50
+  batch_size: 64
+  validation_split: 0.2
+  features:
+    - "rsi"
+    - "ema_ratio"
+    - "bb_position"
+    - "adx"
+    - "volume_ratio"
+    - "obi"
+    - "atr_pct"
+    - "momentum_score"
+    - "trend_strength"
+    - "spread_pct"
+
+monitoring:
+  health_check_interval: 30
+  auto_restart: true
+  max_restart_attempts: 10
+  heartbeat_interval: 10
+  metrics_retention_hours: 72
+
+stress_test:
+  duration_hours: 72
+  crash_interval_minutes: 30
+  network_drop_duration_seconds: 10
+  cpu_spike_duration_seconds: 5
