@@ -11,6 +11,7 @@ precedence over YAML values for deployment flexibility.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -45,6 +46,7 @@ class TradingConfig(BaseModel):
     scan_interval_seconds: int = 60
     position_check_interval_seconds: int = 2
     hft_scan_interval_seconds: int = 1
+    candle_poll_seconds: int = 60
     warmup_bars: int = 500
     warmup_timeframe: str = "1m"
     timeframes: List[int] = Field(default_factory=lambda: [1])
@@ -188,6 +190,10 @@ class AIConfig(BaseModel):
     confluence_threshold: int = 3
     min_confidence: float = 0.65
     min_risk_reward_ratio: float = 0.9  # Only take trades where TP distance >= this * SL distance
+    allow_keltner_solo: bool = False
+    allow_any_solo: bool = False
+    keltner_solo_min_confidence: float = 0.60
+    solo_min_confidence: float = 0.65
     tflite_model_path: str = "models/trade_predictor.tflite"
     order_book_depth: int = 25
     obi_threshold: float = 0.15
@@ -351,10 +357,13 @@ class ConfigManager:
 
     _instance: Optional[ConfigManager] = None
     _config: Optional[BotConfig] = None
+    _lock: threading.Lock = threading.Lock()
 
     def __new__(cls) -> ConfigManager:
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self):
@@ -392,6 +401,14 @@ class ConfigManager:
             "DASHBOARD_PORT": ("dashboard", "port", int),
             "MODEL_RETRAIN_INTERVAL_HOURS": ("ml", "retrain_interval_hours", int),
             "DB_PATH": ("app", "db_path"),
+            "EXCHANGE_NAME": ("exchange", "name"),
+            "ACTIVE_EXCHANGE": ("exchange", "name"),
+            "EXCHANGE_REST_URL": ("exchange", "rest_url"),
+            "EXCHANGE_WS_URL": ("exchange", "ws_url"),
+            "EXCHANGE_MAKER_FEE": ("exchange", "maker_fee", float),
+            "EXCHANGE_TAKER_FEE": ("exchange", "taker_fee", float),
+            "EXCHANGE_POST_ONLY": ("exchange", "post_only", lambda v: v.lower() in ("1", "true", "yes", "on")),
+            "CANDLE_POLL_SECONDS": ("trading", "candle_poll_seconds", int),
         }
 
         for env_key, mapping in env_mappings.items():
@@ -405,8 +422,12 @@ class ConfigManager:
                     config[section] = {}
                 try:
                     config[section][key] = converter(value)
-                except (ValueError, TypeError):
-                    pass  # Keep YAML value if env conversion fails
+                except (ValueError, TypeError) as e:
+                    import logging
+                    logging.getLogger("config").warning(
+                        "Env %s=%r failed to convert: %s. Using YAML value.",
+                        env_key, value, e,
+                    )
 
     @property
     def config(self) -> BotConfig:

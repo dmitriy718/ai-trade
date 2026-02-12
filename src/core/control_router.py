@@ -53,11 +53,16 @@ class ControlRouter:
         logger.info("Trading resumed via control router")
         return {"ok": True, "status": "resumed"}
 
-    async def close_all(self, reason: str = "control") -> Dict[str, Any]:
-        """Close all open positions. Returns closed count."""
+    async def close_all(
+        self, reason: str = "control", tenant_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Close all open positions. Returns closed count.
+        Optional tenant_id for API-scoped close (e.g. multi-tenant)."""
         if not self._engine:
             return {"ok": False, "error": "engine not set", "closed": 0}
-        count = await self._engine.executor.close_all_positions(reason)
+        count = await self._engine.executor.close_all_positions(
+            reason, tenant_id=tenant_id
+        )
         logger.info("Close all via control router", reason=reason, closed=count)
         return {"ok": True, "closed": count}
 
@@ -76,6 +81,7 @@ class ControlRouter:
             return {"status": "no_engine"}
         return {
             "status": "running" if self._engine._running else "stopped",
+            "exchange": getattr(self._engine, "exchange_name", "unknown"),
             "mode": getattr(self._engine, "mode", "unknown"),
             "paused": getattr(self._engine, "_trading_paused", False),
             "uptime_seconds": (

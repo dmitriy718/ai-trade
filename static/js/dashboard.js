@@ -118,10 +118,16 @@ function renderPerformance(perf, risk) {
     const realized = perf.total_pnl || 0;
     const unrealized = perf.unrealized_pnl || 0;
     const totalPnl = realized + unrealized;
+    const totalEquity = perf.total_equity || (risk ? (risk.bankroll || 0) + unrealized : 0);
     const el = document.getElementById('totalPnl');
     if (el) {
         el.textContent = formatMoney(totalPnl);
         el.className = 'pnl-value' + (totalPnl < 0 ? ' negative' : '');
+    }
+    const eqEl = document.getElementById('totalEquity');
+    if (eqEl) {
+        eqEl.textContent = formatMoneyPlain(totalEquity);
+        eqEl.className = 'equity-value' + (totalEquity < 0 ? ' negative' : '');
     }
 
     const uEl = document.getElementById('unrealizedPnl');
@@ -148,20 +154,40 @@ function renderPerformance(perf, risk) {
 function renderPositions(positions) {
     const tbody = document.getElementById('positionsBody');
     if (!tbody) return;
-    if (!positions || positions.length === 0) {
-        tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No open positions</td></tr>';
+    const cleaned = (positions || []).filter(p => Math.abs(Number(p?.quantity) || 0) > 0.00000001);
+    if (cleaned.length === 0) {
+        tbody.innerHTML = '<tr class="empty-row"><td colspan="8">No open positions</td></tr>';
         return;
     }
     let html = '';
-    for (const pos of positions) {
-        const pnl = pos.unrealized_pnl || 0;
-        const pnlPct = pos.unrealized_pnl_pct || 0;
+    for (const pos of cleaned) {
+        const qty = Number(pos.quantity) || 0;
+        const entry = Number(pos.entry_price) || 0;
+        const current = Number(pos.current_price) || 0;
+        const pnl = Number(pos.unrealized_pnl) || 0;
+        const pnlPct = getPnlPct(pos, entry, qty, pnl);
+        const sizeUsd = Math.abs((current || entry) * qty);
+        const conf = resolveConfidence(pos);
         html += `<tr>
             <td>${pos.pair}</td>
             <td class="${pos.side === 'buy' ? 'side-buy' : 'side-sell'}">${pos.side.toUpperCase()}</td>
-            <td>${formatPrice(pos.entry_price)}</td>
-            <td>${formatPrice(pos.current_price || 0)}</td>
-            <td class="${pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">${formatMoney(pnl)} (${(pnlPct * 100).toFixed(2)}%)</td>
+            <td>
+                <div class="cell-stack">
+                    <span class="cell-main">${formatQty(qty)}</span>
+                    <span class="cell-sub">${formatMoneyPlain(sizeUsd)}</span>
+                </div>
+            </td>
+            <td>${formatPrice(entry)}</td>
+            <td>${formatPrice(current || entry)}</td>
+            <td class="${pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">
+                <div class="cell-stack">
+                    <span class="cell-main">${formatMoney(pnl)}</span>
+                    <span class="cell-sub">${(pnlPct * 100).toFixed(2)}%</span>
+                </div>
+            </td>
+            <td>
+                ${renderConfidence(conf)}
+            </td>
             <td>${formatPrice(pos.stop_loss || 0)}</td>
         </tr>`;
     }
@@ -464,11 +490,23 @@ function formatMoney(v) {
     return (n >= 0 ? '+$' : '-$') + Math.abs(n).toFixed(2);
 }
 
+function formatMoneyPlain(v) {
+    const n = Number(v) || 0;
+    return '$' + Math.abs(n).toFixed(2);
+}
+
 function formatPrice(p) {
     p = Number(p) || 0;
     if (p >= 1000) return '$' + p.toFixed(2);
     if (p >= 1) return '$' + p.toFixed(4);
     return '$' + p.toFixed(6);
+}
+
+function formatQty(q) {
+    const n = Number(q) || 0;
+    if (Math.abs(n) >= 100) return n.toFixed(2);
+    if (Math.abs(n) >= 1) return n.toFixed(4);
+    return n.toFixed(6);
 }
 
 function formatUptime(s) {
@@ -482,6 +520,39 @@ function formatTime(iso) {
 }
 
 function escHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+
+function safeJsonParse(val) {
+    if (!val || typeof val !== 'string') return null;
+    try { return JSON.parse(val); } catch { return null; }
+}
+
+function resolveConfidence(pos) {
+    const direct = Number(pos?.confidence);
+    if (Number.isFinite(direct)) return direct;
+    const meta = typeof pos?.metadata === 'string' ? safeJsonParse(pos.metadata) : pos?.metadata;
+    const metaConf = Number(meta?.ai_confidence);
+    return Number.isFinite(metaConf) ? metaConf : null;
+}
+
+function renderConfidence(conf) {
+    if (!Number.isFinite(conf)) return '<span class="cell-sub">--</span>';
+    let pct = conf;
+    if (pct > 1.01) pct = pct / 100;
+    pct = Math.max(0, Math.min(pct, 1));
+    const pctLabel = Math.round(pct * 100);
+    return `<div class="conf-wrap">
+        <span class="conf-text">${pctLabel}%</span>
+        <div class="conf-bar"><div class="conf-fill" style="width:${pctLabel}%"></div></div>
+    </div>`;
+}
+
+function getPnlPct(pos, entry, qty, pnl) {
+    const raw = Number(pos?.unrealized_pnl_pct);
+    if (Number.isFinite(raw)) return raw;
+    const denom = Math.abs(entry * qty);
+    if (denom <= 0) return 0;
+    return pnl / denom;
+}
 
 // ---- Init ----
 

@@ -303,6 +303,8 @@ body {
 /* ---- PnL Card ---- */
 .pnl-card {
     grid-column: 1 / 2;
+    background: radial-gradient(120% 120% at 50% 0%, rgba(0, 255, 255, 0.08), transparent 60%), var(--glass-bg);
+    border-color: rgba(0, 255, 255, 0.2);
 }
 
 .pnl-main {
@@ -332,6 +334,36 @@ body {
 .pnl-value.negative {
     color: var(--red);
     text-shadow: var(--glow-red);
+}
+
+.equity-line {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    background: rgba(0, 255, 255, 0.04);
+    border: 1px solid rgba(0, 255, 255, 0.08);
+    border-radius: 10px;
+}
+
+.equity-label {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+
+.equity-value {
+    font-family: var(--font-display);
+    font-size: 18px;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.equity-value.negative {
+    color: var(--red);
 }
 
 .pnl-grid {
@@ -509,6 +541,7 @@ body {
     padding: 8px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.02);
     color: var(--text-secondary);
+    vertical-align: top;
 }
 
 .positions-table .empty-row td {
@@ -522,6 +555,48 @@ body {
 .side-sell { color: var(--red); font-weight: 600; }
 .pnl-positive { color: var(--neon-green); }
 .pnl-negative { color: var(--red); }
+
+.cell-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.cell-main {
+    font-size: 12px;
+    color: var(--text-primary);
+}
+
+.cell-sub {
+    font-size: 10px;
+    color: var(--text-dim);
+}
+
+.conf-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 70px;
+}
+
+.conf-text {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-primary);
+}
+
+.conf-bar {
+    height: 4px;
+    background: rgba(0, 255, 255, 0.08);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.conf-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--cyan-dim), var(--neon-green));
+    box-shadow: 0 0 8px rgba(0, 255, 255, 0.3);
+}
 
 /* ---- Strategy Monitor ---- */
 .strategy-card {

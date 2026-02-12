@@ -24,7 +24,6 @@ from typing import Any, Dict, List, Optional, Callable
 from src.ai.confluence import ConfluenceSignal
 from src.core.database import DatabaseManager
 from src.core.logger import get_logger
-from src.exchange.kraken_rest import KrakenRESTClient
 from src.exchange.market_data import MarketDataCache
 from src.execution.risk_manager import RiskManager, StopLossState
 from src.strategies.base import SignalDirection
@@ -50,7 +49,7 @@ class TradeExecutor:
 
     def __init__(
         self,
-        rest_client: KrakenRESTClient,
+        rest_client: Any,
         market_data: MarketDataCache,
         risk_manager: RiskManager,
         db: DatabaseManager,
@@ -441,7 +440,7 @@ class TradeExecutor:
                     "stop_loss": state.current_sl,
                     "trailing_stop": state.current_sl if state.trailing_activated else None,
                     "metadata": meta
-                })
+                }, tenant_id=self.tenant_id)
 
     async def _close_position(
         self,
@@ -454,8 +453,11 @@ class TradeExecutor:
         reason: str,
         metadata: Optional[Dict[str, Any]] = None,
         strategy: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> None:
-        """Close a position and record the result."""
+        """Close a position and record the result.
+        Optional tenant_id for multi-tenant close_all; defaults to self.tenant_id."""
+        tid = tenant_id if tenant_id is not None else self.tenant_id
         # C7 FIX: Include both entry and exit fees in PnL
         entry_fee_rate = self.taker_fee
         meta = {}
@@ -525,7 +527,7 @@ class TradeExecutor:
                         await self.db.update_trade(trade_id, {
                             "notes": f"EXIT FAILED after 3 attempts: {str(e)}",
                             "status": "error",
-                        })
+                        }, tenant_id=tid)
                         logger.critical("Exit order permanently failed", trade_id=trade_id)
                         return
 
@@ -537,7 +539,7 @@ class TradeExecutor:
                 await self.db.update_trade(trade_id, {
                     "quantity": actual_quantity,
                     "notes": f"Partial exit fill: {actual_quantity:.8f}/{quantity:.8f}",
-                })
+                }, tenant_id=tid)
             except Exception:
                 pass
 
@@ -558,7 +560,8 @@ class TradeExecutor:
 
         # Update database
         await self.db.close_trade(
-            trade_id, actual_exit_price, pnl, pnl_pct, fees
+            trade_id, actual_exit_price, pnl, pnl_pct, fees,
+            tenant_id=tid,
         )
 
         # Update risk manager
@@ -922,13 +925,17 @@ class TradeExecutor:
 
         return None, None, False, 0.0
 
-    async def close_all_positions(self, reason: str = "manual") -> int:
+    async def close_all_positions(
+        self, reason: str = "manual", tenant_id: Optional[str] = None
+    ) -> int:
         """
         Emergency close all open positions.
         
         # ENHANCEMENT: Added parallel closing for speed
+        Optional tenant_id for API-scoped close (e.g. multi-tenant) - defaults to self.tenant_id.
         """
-        open_trades = await self.db.get_open_trades(tenant_id=self.tenant_id)
+        tid = tenant_id if tenant_id is not None else self.tenant_id
+        open_trades = await self.db.get_open_trades(tenant_id=tid)
         closed_count = 0
 
         for trade in open_trades:
@@ -945,6 +952,7 @@ class TradeExecutor:
                         reason,
                         metadata=trade.get("metadata"),
                         strategy=trade.get("strategy"),
+                        tenant_id=tid,
                     )
                     closed_count += 1
             except Exception as e:

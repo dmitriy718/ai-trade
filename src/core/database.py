@@ -276,8 +276,14 @@ class DatabaseManager:
         "duration_seconds", "notes", "metadata", "quantity",
     })
 
-    async def update_trade(self, trade_id: str, updates: Dict[str, Any]) -> None:
-        """Update an existing trade record. Only whitelisted columns allowed."""
+    async def update_trade(
+        self,
+        trade_id: str,
+        updates: Dict[str, Any],
+        tenant_id: Optional[str] = None,
+    ) -> None:
+        """Update an existing trade record. Only whitelisted columns allowed.
+        Optional tenant_id for multi-tenant defense in depth."""
         if not self._initialized:
             raise RuntimeError("Database not initialized")
         async with self._lock:
@@ -294,16 +300,26 @@ class DatabaseManager:
                 return
             set_clauses.append("updated_at = datetime('now')")
             values.append(trade_id)
-
-            sql = f"UPDATE trades SET {', '.join(set_clauses)} WHERE trade_id = ?"
+            where = "trade_id = ?"
+            if tenant_id:
+                where += " AND (tenant_id = ? OR tenant_id IS NULL)"
+                values.append(tenant_id)
+            sql = f"UPDATE trades SET {', '.join(set_clauses)} WHERE {where}"
             await self._db.execute(sql, values)
             await self._db.commit()
 
     async def close_trade(
-        self, trade_id: str, exit_price: float, pnl: float,
-        pnl_pct: float, fees: float = 0.0, slippage: float = 0.0
+        self,
+        trade_id: str,
+        exit_price: float,
+        pnl: float,
+        pnl_pct: float,
+        fees: float = 0.0,
+        slippage: float = 0.0,
+        tenant_id: Optional[str] = None,
     ) -> None:
-        """Close a trade with final P&L calculation."""
+        """Close a trade with final P&L calculation.
+        Optional tenant_id for multi-tenant defense in depth."""
         now = datetime.now(timezone.utc).isoformat()
         async with self._lock:
             # Get entry time to calculate duration
@@ -320,13 +336,21 @@ class DatabaseManager:
                 except (ValueError, TypeError):
                     pass
 
+            where = "trade_id = ?"
+            params: List[Any] = [
+                exit_price, pnl, pnl_pct, fees, slippage, now, duration, trade_id
+            ]
+            if tenant_id:
+                where += " AND (tenant_id = ? OR tenant_id IS NULL)"
+                params.append(tenant_id)
+
             await self._db.execute(
-                """UPDATE trades SET 
+                f"""UPDATE trades SET 
                     exit_price = ?, pnl = ?, pnl_pct = ?, fees = ?,
                     slippage = ?, status = 'closed', exit_time = ?,
                     duration_seconds = ?, updated_at = datetime('now')
-                WHERE trade_id = ?""",
-                (exit_price, pnl, pnl_pct, fees, slippage, now, duration, trade_id)
+                WHERE {where}""",
+                tuple(params),
             )
             await self._db.commit()
 
@@ -336,7 +360,8 @@ class DatabaseManager:
         tenant_id: Optional[str] = "default",
     ) -> List[Dict[str, Any]]:
         """Get all open trades, optionally filtered by pair and tenant."""
-        sql = "SELECT * FROM trades WHERE status = 'open'"
+        # Guard: ignore zero-quantity "phantom" positions
+        sql = "SELECT * FROM trades WHERE status = 'open' AND ABS(quantity) > 0.00000001"
         params: List[Any] = []
         if tenant_id:
             sql += " AND (tenant_id = ? OR tenant_id IS NULL)"
@@ -601,10 +626,17 @@ class DatabaseManager:
         """Get aggregate performance statistics. Optional tenant_id for multi-tenant."""
         stats = {}
         tc = " AND (tenant_id = ? OR tenant_id IS NULL)" if tenant_id else ""
-        p: tuple = (tenant_id,) if tenant_id else ()
+        p: list = [tenant_id] if tenant_id else []
+
+        reset_ts = await self.get_state("stats_reset_ts")
+        rc = ""
+        if reset_ts:
+            rc = " AND exit_time >= ?"
+            p.append(reset_ts)
 
         cursor = await self._db.execute(
-            f"SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status = 'closed'{tc}", p
+            f"SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status = 'closed'{tc}{rc}",
+            tuple(p),
         )
         row = await cursor.fetchone()
         stats["total_pnl"] = row[0] if row else 0.0
@@ -613,40 +645,43 @@ class DatabaseManager:
             f"""SELECT COUNT(*) as total,
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
                 SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses
-            FROM trades WHERE status = 'closed'{tc}""",
-            p,
+            FROM trades WHERE status = 'closed'{tc}{rc}""",
+            tuple(p),
         )
         row = await cursor.fetchone()
-        stats["total_trades"] = row[0] if row else 0
-        stats["winning_trades"] = row[1] if row else 0
-        stats["losing_trades"] = row[2] if row else 0
+        stats["total_trades"] = row[0] if row and row[0] is not None else 0
+        stats["winning_trades"] = row[1] if row and row[1] is not None else 0
+        stats["losing_trades"] = row[2] if row and row[2] is not None else 0
         stats["win_rate"] = (
             stats["winning_trades"] / stats["total_trades"]
             if stats["total_trades"] > 0 else 0.0
         )
 
         cursor = await self._db.execute(
-            f"SELECT AVG(pnl) FROM trades WHERE status = 'closed' AND pnl > 0{tc}", p
+            f"SELECT AVG(pnl) FROM trades WHERE status = 'closed' AND pnl > 0{tc}{rc}",
+            tuple(p),
         )
         row = await cursor.fetchone()
         stats["avg_win"] = row[0] if row and row[0] else 0.0
 
         cursor = await self._db.execute(
-            f"SELECT AVG(pnl) FROM trades WHERE status = 'closed' AND pnl <= 0{tc}", p
+            f"SELECT AVG(pnl) FROM trades WHERE status = 'closed' AND pnl <= 0{tc}{rc}",
+            tuple(p),
         )
         row = await cursor.fetchone()
         stats["avg_loss"] = row[0] if row and row[0] else 0.0
 
         cursor = await self._db.execute(
-            f"SELECT COUNT(*) FROM trades WHERE status = 'open'{tc}", p
+            f"SELECT COUNT(*) FROM trades WHERE status = 'open' AND ABS(quantity) > 0.00000001{tc}",
+            tuple([tenant_id] if tenant_id else []),
         )
         row = await cursor.fetchone()
         stats["open_positions"] = row[0] if row else 0
 
         cursor = await self._db.execute(
             f"""SELECT COALESCE(SUM(pnl), 0) FROM trades
-            WHERE status = 'closed' AND date(exit_time) = date('now'){tc}""",
-            p,
+            WHERE status = 'closed' AND date(exit_time) = date('now'){tc}{rc}""",
+            tuple(p),
         )
         row = await cursor.fetchone()
         stats["today_pnl"] = row[0] if row else 0.0

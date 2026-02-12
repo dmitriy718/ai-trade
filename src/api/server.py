@@ -87,7 +87,9 @@ class DashboardServer:
             if self._generated_secret:
                 logger.warning(
                     "DASHBOARD_SECRET_KEY not set; generated an ephemeral secret. "
-                    "Set the env var to enable control endpoints."
+                    "Set the env var to enable control endpoints. "
+                    "Ephemeral secret (copy for paper mode): %s",
+                    self._api_secret,
                 )
         if self._stripe_service and engine and getattr(engine, "db", None):
             self._stripe_service.set_db(engine.db)
@@ -204,12 +206,14 @@ class DashboardServer:
             if not self._bot_engine:
                 return []
             positions = await self._bot_engine.db.get_open_trades(tenant_id=tenant_id)
+            positions = [p for p in positions if abs(p.get("quantity", 0) or 0) > 0.00000001]
             # Add current price and unrealized PnL
             for pos in positions:
                 current_price = self._bot_engine.market_data.get_latest_price(
                     pos["pair"]
                 )
                 if current_price > 0:
+                    notional = pos["entry_price"] * pos["quantity"]
                     if pos["side"] == "buy":
                         pos["unrealized_pnl"] = (
                             (current_price - pos["entry_price"]) * pos["quantity"]
@@ -221,8 +225,8 @@ class DashboardServer:
                     pos["current_price"] = current_price
                     pos["unrealized_pnl_pct"] = (
                         pos["unrealized_pnl"] /
-                        (pos["entry_price"] * pos["quantity"])
-                    ) if pos["entry_price"] * pos["quantity"] > 0 else 0
+                        notional
+                    ) if notional > 0 else 0
             return positions
 
         @self.app.get("/api/v1/performance")
@@ -370,13 +374,17 @@ class DashboardServer:
         ):
             """Emergency close all positions. Requires X-API-Key header."""
             if self._control_router:
-                result = await self._control_router.close_all("api_close_all")
+                result = await self._control_router.close_all(
+                    "api_close_all", tenant_id=tenant_id
+                )
                 if not result.get("ok"):
                     raise HTTPException(status_code=503, detail=result.get("error", "Bot not running"))
                 return {"closed": result.get("closed", 0)}
             if not self._bot_engine:
                 raise HTTPException(status_code=503, detail="Bot not running")
-            count = await self._bot_engine.executor.close_all_positions("api_close_all")
+            count = await self._bot_engine.executor.close_all_positions(
+                "api_close_all", tenant_id=tenant_id
+            )
             return {"closed": count}
 
         @self.app.post("/api/v1/control/pause", dependencies=[Depends(_require_auth)])
@@ -465,6 +473,7 @@ class DashboardServer:
         try:
             performance = await self._bot_engine.db.get_performance_stats(tenant_id=tenant_id)
             positions = await self._bot_engine.db.get_open_trades(tenant_id=tenant_id)
+            positions = [p for p in positions if abs(p.get("quantity", 0) or 0) > 0.00000001]
             thoughts = await self._bot_engine.db.get_thoughts(limit=50, tenant_id=tenant_id)
 
             # S12 FIX: Add current prices and net unrealized P&L (minus estimated exit fee)
@@ -472,6 +481,7 @@ class DashboardServer:
             for pos in positions:
                 cp = self._bot_engine.market_data.get_latest_price(pos["pair"])
                 if cp > 0:
+                    notional = pos["entry_price"] * pos["quantity"]
                     if pos["side"] == "buy":
                         gross = (cp - pos["entry_price"]) * pos["quantity"]
                     else:
@@ -479,6 +489,9 @@ class DashboardServer:
                     est_exit_fee = abs(cp * pos["quantity"]) * FEE_RATE
                     pos["unrealized_pnl"] = round(gross - est_exit_fee, 2)
                     pos["current_price"] = cp
+                    pos["unrealized_pnl_pct"] = (
+                        (gross - est_exit_fee) / notional
+                    ) if notional > 0 else 0
 
             scanner_data = {}
             for pair in self._bot_engine.pairs:

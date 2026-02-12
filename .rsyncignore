@@ -24,3 +24,6 @@ models/
 node_modules/
 dist/
 build/
+.secrets/
+.health_check.state
+.log_watch.offset
