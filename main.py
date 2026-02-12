@@ -50,6 +50,7 @@ def preflight_checks() -> bool:
 
 async def run_bot():
     """Initialize and run the bot engine with dashboard server."""
+    logger = get_logger("main")
     engine = BotEngine()
 
     # Phase 1: Initialize all subsystems
@@ -88,21 +89,60 @@ async def run_bot():
         tenant_id=engine.tenant_id,
     )
 
-    async def _run_with_logging(coro, name):
-        try:
-            await coro
-        except Exception as e:
-            logger.error(f"Background task {name} failed", error=str(e), traceback=traceback.format_exc())
+    async def _run_with_restart(name, coro_factory, base_delay=2, max_delay=30):
+        failures = 0
+        while engine._running:
+            try:
+                await coro_factory()
+                if engine._running:
+                    failures += 1
+                    logger.warning(
+                        "Background task exited unexpectedly",
+                        task=name,
+                        failures=failures,
+                    )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                failures += 1
+                logger.error(
+                    "Background task failed",
+                    task=name,
+                    error=repr(e),
+                    error_type=type(e).__name__,
+                    traceback=traceback.format_exc(),
+                    failures=failures,
+                )
+            if engine._running:
+                delay = min(max_delay, base_delay * (2 ** min(failures - 1, 5)))
+                try:
+                    await engine.db.log_thought(
+                        "system",
+                        f"Task {name} restarted after error (retry in {delay}s)",
+                        severity="warning",
+                        tenant_id=engine.tenant_id,
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(delay)
 
     # Phase 4: Start background tasks
     engine._tasks = [
-        asyncio.create_task(_run_with_logging(engine._main_scan_loop(), "scan_loop")),
-        asyncio.create_task(_run_with_logging(engine._position_management_loop(), "position_loop")),
-        asyncio.create_task(_run_with_logging(engine._ws_data_loop(), "ws_loop")),
-        asyncio.create_task(_run_with_logging(engine._health_monitor(), "health_monitor")),
-        asyncio.create_task(_run_with_logging(engine._cleanup_loop(), "cleanup_loop")),
-        asyncio.create_task(_run_with_logging(engine.retrainer.run(), "auto_retrainer")),
+        asyncio.create_task(_run_with_restart("scan_loop", engine._main_scan_loop)),
+        asyncio.create_task(_run_with_restart("position_loop", engine._position_management_loop)),
+        asyncio.create_task(_run_with_restart("ws_loop", engine._ws_data_loop)),
+        asyncio.create_task(_run_with_restart("health_monitor", engine._health_monitor)),
+        asyncio.create_task(_run_with_restart("cleanup_loop", engine._cleanup_loop)),
+        asyncio.create_task(_run_with_restart("auto_retrainer", engine.retrainer.run)),
     ]
+    if getattr(engine, "exchange_name", "") == "coinbase":
+        engine._tasks.append(
+            asyncio.create_task(_run_with_restart("rest_candles", engine._rest_candle_poll_loop))
+        )
+    if engine.telegram_bot:
+        engine._tasks.append(
+            asyncio.create_task(_run_with_restart("telegram_bot", engine.telegram_bot.start))
+        )
     server_task = asyncio.create_task(server.serve())
 
     # Phase 5: Wait for shutdown signal

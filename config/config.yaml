@@ -10,7 +10,7 @@ app:
   db_path: "data/trading.db"
 
 exchange:
-  name: "kraken"
+  name: "kraken"  # kraken | coinbase
   ws_url: "wss://ws.kraken.com/v2"
   ws_auth_url: "wss://ws-auth.kraken.com/v2"
   rest_url: "https://api.kraken.com"
@@ -38,24 +38,25 @@ trading:
   scan_interval_seconds: 30   # More frequent scans = more chances to catch setups
   position_check_interval_seconds: 2
   hft_scan_interval_seconds: 1
+  candle_poll_seconds: 60     # REST candle poll interval (used for Coinbase)
   warmup_bars: 720     # 12 hours of 1-min data for indicator convergence
   warmup_timeframe: "1m"
   timeframes: [1, 5, 15]
-  max_concurrent_positions: 10
-  cooldown_seconds: 300
-  max_spread_pct: 0.002
-  use_closed_candles_only: false
+  max_concurrent_positions: 5
+  cooldown_seconds: 600
+  max_spread_pct: 0.0015
+  use_closed_candles_only: true
   strategy_cooldowns_seconds:
-    keltner: 300
-    trend: 300
-    mean_reversion: 300
-    momentum: 300
-    vwap_momentum_alpha: 300
-    rsi_mean_reversion: 300
-    breakout: 300
-    reversal: 300
+    keltner: 600
+    trend: 600
+    mean_reversion: 600
+    momentum: 600
+    vwap_momentum_alpha: 600
+    rsi_mean_reversion: 600
+    breakout: 600
+    reversal: 600
   event_price_move_pct: 0.005
-  single_strategy_mode: false   # or "keltner", "trend", "mean_reversion", etc. for testing
+  single_strategy_mode: null    # or "keltner", "trend", "mean_reversion", etc. for testing
 
 strategies:
   # Keltner Channel — primary strategy for high win rate
@@ -127,7 +128,8 @@ strategies:
 
 ai:
   confluence_threshold: 2  # Min strategies that must agree
-  min_confidence: 0.55
+  min_confidence: 0.62
+  min_risk_reward_ratio: 1.1
   tflite_model_path: "models/trade_predictor.tflite"
   order_book_depth: 25
   obi_threshold: 0.15  # Order Book Imbalance threshold
@@ -135,8 +137,12 @@ ai:
   book_score_max_age_seconds: 5
   multi_timeframe_min_agreement: 2
   primary_timeframe: 1
-  obi_counts_as_confluence: false  # "Weighted Order Book": when true, OBI + 1 strategy = tradable
+  obi_counts_as_confluence: true  # "Weighted Order Book": when true, OBI + 1 strategy = tradable
   obi_weight: 0.4
+  allow_keltner_solo: false
+  allow_any_solo: false
+  keltner_solo_min_confidence: 0.62
+  solo_min_confidence: 0.67
   whale_threshold_usd: 50000
   regime:
     adx_trend_threshold: 25
@@ -179,7 +185,7 @@ risk:
   max_risk_per_trade: 0.005  # 0.5% of bankroll (was 2%)
   max_daily_loss: 0.05      # 5% max daily drawdown
   max_position_usd: 200.0   # (was 500)
-  initial_bankroll: 10000.0
+  initial_bankroll: 5000.0
   atr_multiplier_sl: 2.0
   atr_multiplier_tp: 3.0
   trailing_activation_pct: 0.012  # 1.2% profit to activate trailing (was 0.8)
@@ -194,9 +200,9 @@ control:
   web:
     enabled: true
   telegram:
-    enabled: false
+    enabled: true
     token: ""   # or set TELEGRAM_BOT_TOKEN
-    chat_ids: []  # allowlist of Telegram chat IDs
+    chat_ids: []  # allowlist of Telegram chat IDs (or set TELEGRAM_CHAT_ID)
   discord:
     enabled: false
     token: ""

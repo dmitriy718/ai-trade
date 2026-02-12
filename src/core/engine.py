@@ -16,6 +16,7 @@ import asyncio
 import os
 import signal
 import time
+import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -23,16 +24,20 @@ from src.ai.confluence import ConfluenceDetector
 from src.ai.order_book import OrderBookAnalyzer
 from src.ai.predictor import TFLitePredictor
 from src.api.server import DashboardServer
+from src.core.control_router import ControlRouter
 from src.core.config import ConfigManager, get_config
 from src.core.database import DatabaseManager
 from src.core.logger import get_logger, setup_logging
 from src.exchange.kraken_rest import KrakenRESTClient
 from src.exchange.kraken_ws import KrakenWebSocketClient
+from src.exchange.coinbase_rest import CoinbaseRESTClient, CoinbaseAuthConfig
+from src.exchange.coinbase_ws import CoinbaseWebSocketClient
 from src.exchange.market_data import MarketDataCache
 from src.execution.executor import TradeExecutor
 from src.execution.risk_manager import RiskManager
 from src.ml.trainer import ModelTrainer, AutoRetrainer
 from src.strategies.base import SignalDirection
+from src.utils.telegram import TelegramBot
 
 logger = get_logger("engine")
 
@@ -64,8 +69,8 @@ class BotEngine:
 
         # Core components (initialized in start())
         self.db: Optional[DatabaseManager] = None
-        self.rest_client: Optional[KrakenRESTClient] = None
-        self.ws_client: Optional[KrakenWebSocketClient] = None
+        self.rest_client: Optional[Any] = None
+        self.ws_client: Optional[Any] = None
         self.market_data: Optional[MarketDataCache] = None
         self.confluence: Optional[ConfluenceDetector] = None
         self.predictor: Optional[TFLitePredictor] = None
@@ -73,6 +78,8 @@ class BotEngine:
         self.risk_manager: Optional[RiskManager] = None
         self.executor: Optional[TradeExecutor] = None
         self.dashboard: Optional[DashboardServer] = None
+        self.control_router: Optional[ControlRouter] = None
+        self.telegram_bot: Optional[TelegramBot] = None
 
         # State
         self._running = False
@@ -84,6 +91,7 @@ class BotEngine:
         self._scan_queue: asyncio.Queue = asyncio.Queue()
         self._pending_scan_pairs: set = set()
         self._event_price_move_pct = getattr(self.config.trading, "event_price_move_pct", 0.005)
+        self.exchange_name = (self.config.exchange.name or "kraken").lower()
 
     async def initialize(self) -> None:
         """Initialize all subsystems."""
@@ -95,29 +103,89 @@ class BotEngine:
         await self.db.initialize()
         logger.info("Database initialized", path=db_path)
 
-        # REST Client
-        api_key = os.getenv("KRAKEN_API_KEY", "")
-        api_secret = os.getenv("KRAKEN_API_SECRET", "")
-        is_sandbox = os.getenv("KRAKEN_SANDBOX", "false").lower() in ("true", "1", "yes")
+        # REST + WebSocket Clients
+        if self.exchange_name == "coinbase":
+            is_sandbox = os.getenv("COINBASE_SANDBOX", "false").lower() in ("true", "1", "yes")
+            rest_url = self.config.exchange.rest_url
+            ws_url = self.config.exchange.ws_url
+            if "kraken" in rest_url:
+                rest_url = CoinbaseRESTClient.DEFAULT_SANDBOX_URL if is_sandbox else CoinbaseRESTClient.DEFAULT_REST_URL
+            if "kraken" in ws_url:
+                ws_url = CoinbaseWebSocketClient.DEFAULT_WS_URL
+            market_data_url = os.getenv("COINBASE_MARKET_DATA_URL", "").strip() or None
+            if is_sandbox and not market_data_url:
+                logger.warning(
+                    "Coinbase sandbox has limited market data endpoints",
+                    hint="Set COINBASE_MARKET_DATA_URL to production if needed",
+                )
 
-        self.rest_client = KrakenRESTClient(
-            api_key=api_key,
-            api_secret=api_secret,
-            rate_limit=self.config.exchange.rate_limit_per_second,
-            max_retries=self.config.exchange.max_retries,
-        )
-        await self.rest_client.initialize()
-        logger.info(
-            "REST client initialized",
-            sandbox=is_sandbox,
-            mode=self.mode,
-            has_key=bool(api_key),
-        )
+            key_name = os.getenv("COINBASE_KEY_NAME", "").strip()
+            if not key_name:
+                org_id = os.getenv("COINBASE_ORG_ID", "").strip()
+                key_id = os.getenv("COINBASE_KEY_ID", "").strip()
+                if org_id and key_id:
+                    key_name = f"organizations/{org_id}/apiKeys/{key_id}"
 
-        # WebSocket Client
-        self.ws_client = KrakenWebSocketClient(
-            url=self.config.exchange.ws_url,
-        )
+            private_key_pem = ""
+            key_path = os.getenv("COINBASE_PRIVATE_KEY_PATH", "").strip()
+            if key_path and os.path.exists(key_path):
+                with open(key_path, "r") as f:
+                    private_key_pem = f.read()
+                if "\\n" in private_key_pem and "\n" not in private_key_pem:
+                    private_key_pem = private_key_pem.replace("\\n", "\n")
+
+            auth_cfg = None
+            if key_name and private_key_pem:
+                auth_cfg = CoinbaseAuthConfig(key_name=key_name, private_key_pem=private_key_pem)
+            else:
+                logger.warning(
+                    "Coinbase auth not configured",
+                    has_key_name=bool(key_name),
+                    has_private_key=bool(private_key_pem),
+                )
+
+            self.rest_client = CoinbaseRESTClient(
+                rest_url=rest_url,
+                market_data_url=market_data_url,
+                rate_limit=self.config.exchange.rate_limit_per_second,
+                max_retries=self.config.exchange.max_retries,
+                timeout=self.config.exchange.timeout,
+                sandbox=is_sandbox,
+                auth_config=auth_cfg,
+            )
+            await self.rest_client.initialize()
+            logger.info(
+                "REST client initialized",
+                exchange="coinbase",
+                sandbox=is_sandbox,
+                mode=self.mode,
+                has_key=bool(auth_cfg),
+            )
+
+            self.ws_client = CoinbaseWebSocketClient(url=ws_url)
+        else:
+            api_key = os.getenv("KRAKEN_API_KEY", "")
+            api_secret = os.getenv("KRAKEN_API_SECRET", "")
+            is_sandbox = os.getenv("KRAKEN_SANDBOX", "false").lower() in ("true", "1", "yes")
+
+            self.rest_client = KrakenRESTClient(
+                api_key=api_key,
+                api_secret=api_secret,
+                rate_limit=self.config.exchange.rate_limit_per_second,
+                max_retries=self.config.exchange.max_retries,
+            )
+            await self.rest_client.initialize()
+            logger.info(
+                "REST client initialized",
+                exchange="kraken",
+                sandbox=is_sandbox,
+                mode=self.mode,
+                has_key=bool(api_key),
+            )
+
+            self.ws_client = KrakenWebSocketClient(
+                url=self.config.exchange.ws_url,
+            )
 
         # Market Data Cache
         self.market_data = MarketDataCache(
@@ -224,6 +292,21 @@ class BotEngine:
         # Dashboard
         self.dashboard = DashboardServer()
         self.dashboard.set_bot_engine(self)
+        self.control_router = ControlRouter(self)
+        self.dashboard.set_control_router(self.control_router)
+
+        # Telegram (optional)
+        try:
+            tcfg = getattr(self.config, "control", None)
+            tcfg = getattr(tcfg, "telegram", None) if tcfg else None
+            if tcfg and getattr(tcfg, "enabled", False):
+                chat_ids = tcfg.chat_ids or None
+                self.telegram_bot = TelegramBot(token=tcfg.token, chat_ids=chat_ids)
+                self.telegram_bot.set_bot_engine(self)
+                self.telegram_bot.set_control_router(self.control_router)
+                await self.telegram_bot.initialize()
+        except Exception as e:
+            logger.error("Telegram bot setup failed", error=str(e))
 
         # Billing (Stripe) - optional
         billing = getattr(self.config, "billing", None)
@@ -330,6 +413,11 @@ class BotEngine:
             except Exception:
                 pass
             await self.db.close()
+        if self.telegram_bot:
+            try:
+                await self.telegram_bot.stop()
+            except Exception:
+                pass
 
         logger.info("Bot engine stopped")
 
@@ -369,7 +457,11 @@ class BotEngine:
                 min_confluence = getattr(self.config.ai, "confluence_threshold", 3)
                 min_confluence = max(2, min_confluence)  # At least 2 strategies must agree
                 exec_confidence = getattr(self.config.ai, "min_confidence", 0.50)
-                exec_confidence = min(exec_confidence, 0.65)  # Cap so we don't over-reject
+                exec_confidence = max(0.45, min(exec_confidence, 0.75))  # Keep within sane bounds
+                allow_keltner_solo = getattr(self.config.ai, "allow_keltner_solo", False)
+                allow_any_solo = getattr(self.config.ai, "allow_any_solo", False)
+                keltner_solo_min = getattr(self.config.ai, "keltner_solo_min_confidence", 0.60)
+                solo_min = getattr(self.config.ai, "solo_min_confidence", 0.65)
 
                 for signal in confluence_signals:
                     if signal.direction == SignalDirection.NEUTRAL:
@@ -406,14 +498,14 @@ class BotEngine:
 
                     # Determine if we should trade this signal:
                     # - Normal: 2+ strategies agreeing (confluence >= 2)
-                    # - Solo: Keltner with conf >= 0.52, or any strategy with conf >= 0.55 (get flow)
+                    # - Solo (optional): Keltner or any strategy with strict confidence gates
                     has_keltner = any(
                         s.strategy_name == "keltner" and s.is_actionable
                         for s in signal.signals
                         if s.direction == signal.direction
                     )
-                    keltner_solo_ok = has_keltner and signal.confidence >= 0.52
-                    any_solo_ok = signal.confluence_count == 1 and signal.confidence >= 0.55
+                    keltner_solo_ok = allow_keltner_solo and has_keltner and signal.confidence >= keltner_solo_min
+                    any_solo_ok = allow_any_solo and signal.confluence_count == 1 and signal.confidence >= solo_min
 
                     if signal.confluence_count < min_confluence and not keltner_solo_ok and not any_solo_ok:
                         continue
@@ -460,7 +552,21 @@ class BotEngine:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Scan loop error", error=str(e))
+                logger.error(
+                    "Scan loop error",
+                    error=repr(e),
+                    error_type=type(e).__name__,
+                    traceback=traceback.format_exc(),
+                )
+                try:
+                    await self.db.log_thought(
+                        "system",
+                        f"Scan loop error: {type(e).__name__} {e}",
+                        severity="error",
+                        tenant_id=self.tenant_id,
+                    )
+                except Exception:
+                    pass
                 await asyncio.sleep(5)
 
     async def _position_management_loop(self) -> None:
@@ -475,7 +581,12 @@ class BotEngine:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Position management loop error", error=str(e))
+                logger.error(
+                    "Position management loop error",
+                    error=repr(e),
+                    error_type=type(e).__name__,
+                    traceback=traceback.format_exc(),
+                )
                 await asyncio.sleep(1)
 
     async def _ws_data_loop(self) -> None:
@@ -500,7 +611,45 @@ class BotEngine:
         except asyncio.CancelledError:
             await self.ws_client.disconnect()
         except Exception as e:
-            logger.error("WebSocket loop error", error=str(e))
+            logger.error(
+                "WebSocket loop error",
+                error=repr(e),
+                error_type=type(e).__name__,
+                traceback=traceback.format_exc(),
+            )
+
+    async def _rest_candle_poll_loop(self) -> None:
+        """Poll REST candles (Coinbase) to maintain 1m base timeframe."""
+        interval = max(30, int(getattr(self.config.trading, "candle_poll_seconds", 60)))
+        logger.info("REST candle poll loop started", interval=interval)
+        while self._running:
+            try:
+                for pair in self.pairs:
+                    ohlc = await self.rest_client.get_ohlc(pair, interval=1, limit=5)
+                    for bar in ohlc[-5:]:
+                        is_new_bar = await self.market_data.update_bar(pair, {
+                            "time": float(bar[0]),
+                            "open": float(bar[1]),
+                            "high": float(bar[2]),
+                            "low": float(bar[3]),
+                            "close": float(bar[4]),
+                            "vwap": float(bar[5]) if len(bar) > 5 else 0,
+                            "volume": float(bar[6]) if len(bar) > 6 else 0,
+                            "count": float(bar[7]) if len(bar) > 7 else 0,
+                        })
+                        if is_new_bar:
+                            self._enqueue_pair(pair, "rest_candle")
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(
+                    "REST candle poll error",
+                    error=repr(e),
+                    error_type=type(e).__name__,
+                    traceback=traceback.format_exc(),
+                )
+                await asyncio.sleep(interval)
 
     async def _health_monitor(self) -> None:
         """Monitor system health and trigger recovery actions."""
@@ -556,7 +705,12 @@ class BotEngine:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Health monitor error", error=str(e))
+                logger.error(
+                    "Health monitor error",
+                    error=repr(e),
+                    error_type=type(e).__name__,
+                    traceback=traceback.format_exc(),
+                )
 
     async def _cleanup_loop(self) -> None:
         """Periodic cleanup of old data."""
@@ -570,7 +724,12 @@ class BotEngine:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Cleanup error", error=str(e))
+                logger.error(
+                    "Cleanup error",
+                    error=repr(e),
+                    error_type=type(e).__name__,
+                    traceback=traceback.format_exc(),
+                )
 
     def _enqueue_pair(self, pair: str, reason: str = "") -> None:
         """Enqueue a pair for event-driven scanning (deduped)."""

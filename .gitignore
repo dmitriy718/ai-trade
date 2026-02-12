@@ -25,12 +25,17 @@ env/
 .env
 .env.*
 !.env.example
+.secrets/
 config/.vault.enc
 config/.vault.bak
 *.key
 *.pem
 *.p12
 *.pfx
+
+# Local monitoring state
+.health_check.state
+.log_watch.offset
 
 # Data (auto-generated)
 data/

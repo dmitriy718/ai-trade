@@ -326,9 +326,25 @@ class MarketDataCache:
         bids = book.get("bids", [])
         asks = book.get("asks", [])
         if bids and asks:
-            best_bid = float(bids[0][0])
-            best_ask = float(asks[0][0])
-            if best_bid > 0:
+            def _level_price(level: Any) -> float:
+                try:
+                    if isinstance(level, (list, tuple)):
+                        return float(level[0]) if len(level) > 0 else 0.0
+                    if isinstance(level, dict):
+                        for key in ("price", "p", "rate"):
+                            if key in level:
+                                return float(level[key])
+                        if 0 in level:
+                            return float(level[0])
+                        if "0" in level:
+                            return float(level["0"])
+                except (ValueError, TypeError, IndexError):
+                    return 0.0
+                return 0.0
+
+            best_bid = _level_price(bids[0])
+            best_ask = _level_price(asks[0])
+            if best_bid > 0 and best_ask > 0:
                 return (best_ask - best_bid) / best_bid
         return 0.0
 

@@ -54,7 +54,16 @@ class TelegramBot:
     ):
         self.token = token or os.getenv("TELEGRAM_BOT_TOKEN", "")
         _single = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
-        self.chat_ids = chat_ids if chat_ids is not None else ([_single] if _single else [])
+        env_ids = os.getenv("TELEGRAM_CHAT_IDS", "")
+        if chat_ids is not None:
+            self.chat_ids = chat_ids
+        else:
+            ids = []
+            if _single:
+                ids.append(_single)
+            if env_ids:
+                ids.extend([c.strip() for c in env_ids.split(",") if c.strip()])
+            self.chat_ids = ids
         self.chat_id = self.chat_ids[0] if self.chat_ids else ""  # for send_message
         self.rate_limit_seconds = rate_limit_seconds
         self._bot = None
@@ -63,6 +72,9 @@ class TelegramBot:
         self._bot_engine = None
         self._control_router = None
         self._enabled = bool(self.token and self.chat_ids)
+        self._stop_event: Optional[asyncio.Event] = None
+        polling_env = os.getenv("TELEGRAM_POLLING_ENABLED", "true").strip().lower()
+        self._polling_enabled = polling_env not in ("0", "false", "no", "off")
 
     def set_bot_engine(self, engine) -> None:
         """Inject the bot engine reference for command execution."""
@@ -97,6 +109,15 @@ class TelegramBot:
             self._app.add_handler(CommandHandler("resume", self._cmd_resume))
             self._app.add_handler(CommandHandler("close_all", self._cmd_close_all))
             self._app.add_handler(CommandHandler("kill", self._cmd_kill))
+            self._app.add_handler(CommandHandler("health", self._cmd_health))
+            self._app.add_handler(CommandHandler("uptime", self._cmd_uptime))
+            self._app.add_handler(CommandHandler("strategies", self._cmd_strategies))
+            self._app.add_handler(CommandHandler("exposure", self._cmd_exposure))
+            self._app.add_handler(CommandHandler("scanner", self._cmd_scanner))
+            self._app.add_handler(CommandHandler("exchange", self._cmd_exchange))
+            self._app.add_handler(CommandHandler("pairs", self._cmd_pairs))
+            self._app.add_handler(CommandHandler("config", self._cmd_config))
+            self._app.add_handler(CommandHandler("whoami", self._cmd_whoami))
             self._app.add_handler(CommandHandler("help", self._cmd_help))
 
             logger.info("Telegram bot initialized")
@@ -117,9 +138,12 @@ class TelegramBot:
             return
 
         try:
+            if self._stop_event is None:
+                self._stop_event = asyncio.Event()
             await self._app.initialize()
             await self._app.start()
-            await self._app.updater.start_polling()
+            if self._polling_enabled:
+                await self._app.updater.start_polling()
 
             await self.send_message(
                 "🚀 *AI Trading Bot Started*\n"
@@ -128,6 +152,8 @@ class TelegramBot:
                     self._bot_engine.mode if self._bot_engine else "unknown"
                 )
             )
+            # Keep this task alive while polling is running
+            await self._stop_event.wait()
         except Exception as e:
             logger.error("Telegram start failed", error=str(e))
 
@@ -136,11 +162,15 @@ class TelegramBot:
         if self._app:
             try:
                 await self.send_message("🔴 *AI Trading Bot Stopped*")
-                await self._app.updater.stop()
+                if self._polling_enabled:
+                    await self._app.updater.stop()
                 await self._app.stop()
                 await self._app.shutdown()
             except Exception:
                 pass
+            finally:
+                if self._stop_event:
+                    self._stop_event.set()
 
     async def send_message(self, text: str, parse_mode: str = "Markdown") -> None:
         """Send a message to the configured chat, respecting rate limits."""
@@ -196,7 +226,18 @@ class TelegramBot:
         """C5 FIX: Verify chat_id is in allowlist (chat_ids or legacy chat_id)."""
         if not self.chat_ids:
             return False
-        return str(update.message.chat_id) in [str(c) for c in self.chat_ids]
+        ok = str(update.message.chat_id) in [str(c) for c in self.chat_ids]
+        if not ok:
+            try:
+                logger.warning(
+                    "Unauthorized telegram command",
+                    chat_id=str(update.message.chat_id),
+                    user_id=str(getattr(update.effective_user, "id", "")),
+                    username=str(getattr(update.effective_user, "username", "")),
+                )
+            except Exception:
+                pass
+        return ok
 
     async def _cmd_status(self, update, context) -> None:
         """Handle /status command."""
@@ -277,6 +318,134 @@ class TelegramBot:
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
 
+    async def _cmd_health(self, update, context) -> None:
+        """Handle /health command."""
+        if not self._is_authorized(update) or not self._bot_engine:
+            return
+
+        ws_ok = bool(self._bot_engine.ws_client and self._bot_engine.ws_client.is_connected)
+        stale_pairs = []
+        try:
+            stale_pairs = [
+                p for p in self._bot_engine.pairs
+                if self._bot_engine.market_data.is_stale(p, max_age_seconds=600)
+            ]
+        except Exception:
+            stale_pairs = []
+        msg = (
+            "🩺 *Health Check*\n"
+            f"WS: `{'OK' if ws_ok else 'DOWN'}`\n"
+            f"Stale pairs: `{len(stale_pairs)}`"
+        )
+        if stale_pairs:
+            msg += "\n" + ", ".join(stale_pairs[:8])
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_uptime(self, update, context) -> None:
+        """Handle /uptime command."""
+        if not self._is_authorized(update) or not self._bot_engine:
+            return
+        if not self._bot_engine._start_time:
+            await update.message.reply_text("Uptime: `--:--:--`", parse_mode="Markdown")
+            return
+        elapsed = max(0, int(time.time() - self._bot_engine._start_time))
+        h = elapsed // 3600
+        m = (elapsed % 3600) // 60
+        s = elapsed % 60
+        await update.message.reply_text(
+            f"⏱ *Uptime* `{h:02d}:{m:02d}:{s:02d}`",
+            parse_mode="Markdown",
+        )
+
+    async def _cmd_strategies(self, update, context) -> None:
+        """Handle /strategies command."""
+        if not self._is_authorized(update) or not self._bot_engine or not self._bot_engine.confluence:
+            return
+        stats = self._bot_engine.confluence.get_strategy_stats()
+        if not stats:
+            await update.message.reply_text("No strategy stats available")
+            return
+        lines = []
+        for s in stats:
+            name = s.get("name", "unknown")
+            trades = s.get("trades", 0)
+            wr = s.get("win_rate", 0)
+            lines.append(f"- `{name}` WR: `{wr:.1%}` Trades: `{trades}`")
+        msg = "🧠 *Strategies*\n" + "\n".join(lines[:12])
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_exposure(self, update, context) -> None:
+        """Handle /exposure command."""
+        if not self._is_authorized(update) or not self._bot_engine:
+            return
+        risk = self._bot_engine.risk_manager.get_risk_report()
+        msg = (
+            "📌 *Exposure*\n"
+            f"Open positions: `{risk.get('open_positions', 0)}`\n"
+            f"Total exposure: `${risk.get('total_exposure_usd', 0):.2f}`\n"
+            f"Remaining capacity: `${risk.get('remaining_capacity_usd', 0):.2f}`"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_scanner(self, update, context) -> None:
+        """Handle /scanner command."""
+        if not self._is_authorized(update) or not self._bot_engine:
+            return
+        status = self._bot_engine.market_data.get_status()
+        total = len(status)
+        warmed = sum(1 for v in status.values() if v.get("warmed_up"))
+        stale = [k for k, v in status.items() if v.get("stale")]
+        msg = (
+            "📡 *Scanner*\n"
+            f"Pairs: `{total}`\n"
+            f"Warmed: `{warmed}`\n"
+            f"Stale: `{len(stale)}`"
+        )
+        if stale:
+            msg += "\n" + ", ".join(stale[:8])
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_exchange(self, update, context) -> None:
+        """Handle /exchange command."""
+        if not self._is_authorized(update) or not self._bot_engine:
+            return
+        name = getattr(self._bot_engine, "exchange_name", "unknown")
+        rest_url = getattr(self._bot_engine.config.exchange, "rest_url", "")
+        ws_url = getattr(self._bot_engine.config.exchange, "ws_url", "")
+        msg = (
+            "🏦 *Exchange*\n"
+            f"Name: `{name}`\n"
+            f"REST: `{rest_url}`\n"
+            f"WS: `{ws_url}`"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_pairs(self, update, context) -> None:
+        """Handle /pairs command."""
+        if not self._is_authorized(update) or not self._bot_engine:
+            return
+        pairs = list(getattr(self._bot_engine, "pairs", []))
+        if not pairs:
+            await update.message.reply_text("No pairs configured.")
+            return
+        msg = "*Pairs*\n" + ", ".join(pairs[:30])
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_config(self, update, context) -> None:
+        """Handle /config command."""
+        if not self._is_authorized(update) or not self._bot_engine:
+            return
+        cfg = self._bot_engine.config
+        msg = (
+            "⚙️ *Config*\n"
+            f"Mode: `{cfg.app.mode}`\n"
+            f"Pairs: `{len(cfg.trading.pairs)}`\n"
+            f"Scan interval: `{cfg.trading.scan_interval_seconds}s`\n"
+            f"Max spread: `{cfg.trading.max_spread_pct}`\n"
+            f"Confluence: `{cfg.ai.confluence_threshold}`"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
     async def _cmd_pause(self, update, context) -> None:
         """Handle /pause command."""
         if not self._is_authorized(update):
@@ -345,10 +514,34 @@ class TelegramBot:
             "/pnl - Performance summary\n"
             "/positions - Open positions\n"
             "/risk - Risk report\n"
+            "/health - Health check\n"
+            "/uptime - Bot uptime\n"
+            "/strategies - Strategy stats\n"
+            "/exposure - Exposure summary\n"
+            "/scanner - Scanner status\n"
+            "/exchange - Active exchange\n"
+            "/pairs - Trading pairs\n"
+            "/config - Key config values\n"
             "/pause - Pause trading\n"
             "/resume - Resume trading\n"
             "/close\\_all - Close all positions\n"
             "/kill - Emergency shutdown\n"
+            "/whoami - Show your chat ID\n"
             "/help - This message"
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
+
+    async def _cmd_whoami(self, update, context) -> None:
+        """Show chat/user identifiers (no auth required)."""
+        try:
+            chat_id = update.message.chat_id
+            user = update.effective_user
+            msg = (
+                "👤 *Telegram Identity*\n"
+                f"Chat ID: `{chat_id}`\n"
+                f"User ID: `{getattr(user, 'id', '')}`\n"
+                f"Username: `@{getattr(user, 'username', '')}`"
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        except Exception:
+            pass

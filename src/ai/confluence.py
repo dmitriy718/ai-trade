@@ -13,6 +13,7 @@ Imbalance as a final confirmation filter.
 from __future__ import annotations
 
 import asyncio
+import traceback
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -357,7 +358,12 @@ class ConfluenceDetector:
             except Exception as e:
                 logger.error(
                     "Strategy error",
-                    strategy=strategy.name, pair=pair, error=str(e)
+                    strategy=strategy.name,
+                    pair=pair,
+                    error=repr(e),
+                    error_type=type(e).__name__,
+                    bars=len(closes),
+                    traceback="".join(traceback.format_exception(type(e), e, e.__traceback__)),
                 )
 
         return signals
@@ -520,13 +526,27 @@ class ConfluenceDetector:
         if order_book:
             bids = order_book.get("bids", [])
             asks = order_book.get("asks", [])
-            if bids and asks:
+
+            def _level_volume(level: Any) -> float:
                 try:
-                    bid_vol = sum(float(b[1]) for b in bids[:10] if len(b) > 1)
-                    ask_vol = sum(float(a[1]) for a in asks[:10] if len(a) > 1)
+                    if isinstance(level, (list, tuple)):
+                        return float(level[1]) if len(level) > 1 else 0.0
+                    if isinstance(level, dict):
+                        for key in ("volume", "qty", "quantity", "size", "amount", "q", "v", "vol"):
+                            if key in level:
+                                return float(level[key])
+                        # Some feeds use numeric or string indices
+                        if 1 in level:
+                            return float(level[1])
+                        if "1" in level:
+                            return float(level["1"])
                 except (ValueError, TypeError, IndexError):
-                    bid_vol = 0.0
-                    ask_vol = 0.0
+                    return 0.0
+                return 0.0
+
+            if bids and asks:
+                bid_vol = sum(_level_volume(b) for b in bids[:10])
+                ask_vol = sum(_level_volume(a) for a in asks[:10])
                 obi = order_book_imbalance(bid_vol, ask_vol)
                 obi_agrees_long = obi > self.obi_threshold
                 obi_agrees_short = obi < -self.obi_threshold
@@ -726,7 +746,13 @@ class ConfluenceDetector:
         valid_results = []
         for pair, result in zip(pairs, results):
             if isinstance(result, Exception):
-                logger.error("Pair scan failed", pair=pair, error=str(result))
+                logger.error(
+                    "Pair scan failed",
+                    pair=pair,
+                    error=repr(result),
+                    error_type=type(result).__name__,
+                    traceback="".join(traceback.format_exception(type(result), result, result.__traceback__)),
+                )
             else:
                 valid_results.append(result)
 

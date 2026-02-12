@@ -1,1 +1,1 @@
-"""Exchange connectivity: Kraken REST + WebSocket clients."""
+"""Exchange connectivity: Kraken + Coinbase REST/WebSocket clients."""

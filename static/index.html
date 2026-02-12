@@ -58,6 +58,10 @@
                     <span class="pnl-label">Total P&L</span>
                     <span class="pnl-value" id="totalPnl">$0.00</span>
                 </div>
+                <div class="equity-line">
+                    <span class="equity-label">Total Equity</span>
+                    <span class="equity-value" id="totalEquity">$0.00</span>
+                </div>
                 <div class="pnl-grid">
                     <div class="pnl-item">
                         <span class="label">Unrealized</span>
@@ -115,15 +119,17 @@
                         <tr>
                             <th>PAIR</th>
                             <th>SIDE</th>
+                            <th>SIZE</th>
                             <th>ENTRY</th>
                             <th>CURRENT</th>
                             <th>P&L</th>
+                            <th>CONF</th>
                             <th>STOP</th>
                         </tr>
                     </thead>
                     <tbody id="positionsBody">
                         <tr class="empty-row">
-                            <td colspan="6">No open positions</td>
+                            <td colspan="8">No open positions</td>
                         </tr>
                     </tbody>
                 </table>

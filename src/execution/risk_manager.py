@@ -519,7 +519,10 @@ class RiskManager:
         # Update peak and drawdown
         if self.current_bankroll > self._peak_bankroll:
             self._peak_bankroll = self.current_bankroll
-        drawdown = (self._peak_bankroll - self.current_bankroll) / self._peak_bankroll
+        if self._peak_bankroll > 0:
+            drawdown = (self._peak_bankroll - self.current_bankroll) / self._peak_bankroll
+        else:
+            drawdown = 0.0
         self._max_drawdown = max(self._max_drawdown, drawdown)
 
         # Keep history manageable
@@ -597,7 +600,7 @@ class RiskManager:
             "total_return_pct": round(
                 (self.current_bankroll - self.initial_bankroll) /
                 self.initial_bankroll * 100, 2
-            ),
+            ) if self.initial_bankroll > 0 else 0.0,
             "peak_bankroll": round(self._peak_bankroll, 2),
             "current_drawdown": round(
                 (self._peak_bankroll - self.current_bankroll) /
